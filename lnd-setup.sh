@@ -138,9 +138,9 @@ write_lnd_conf() {
 [Application Options]
 alias=${node}
 debuglevel=info
-listen=0.0.0.0:${PORTS[${node}_listen]}
-rpclisten=0.0.0.0:${PORTS[${node}_rpc]}
-restlisten=0.0.0.0:${PORTS[${node}_rest]}
+listen=127.0.0.1:${PORTS[${node}_listen]}
+rpclisten=127.0.0.1:${PORTS[${node}_rpc]}
+restlisten=127.0.0.1:${PORTS[${node}_rest]}
 ${extra}
 
 [Bitcoin]
