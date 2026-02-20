@@ -1,6 +1,6 @@
 # LND Regtest Setup
 
-Automated script that spins up 2 Lightning Network (LND) nodes on regtest, creates wallets, funds them from bitcoind, opens a 5 BTC channel and balances it 2.5/2.5.
+Automated script that spins up 2 Lightning Network (LND) nodes on regtest, creates wallets, funds them from bitcoind, opens a 5 BTC channel, balances it 2.5/2.5, and launches [RTL (Ride The Lightning)](https://github.com/Ride-The-Lightning/RTL) to manage both nodes from a web UI.
 
 ## Prerequisites
 
@@ -22,6 +22,7 @@ regtest=1
 fallbackfee=0.0002
 rpcport=18443
 port=18444
+bind=127.0.0.1
 rpcbind=127.0.0.1
 rpcallowip=127.0.0.1
 rpcuser=YOUR_USER
@@ -29,6 +30,8 @@ rpcpassword=YOUR_PASSWORD
 zmqpubrawblock=tcp://127.0.0.1:28332
 zmqpubrawtx=tcp://127.0.0.1:28333
 ```
+
+> **Note:** `bind=127.0.0.1` ensures the P2P port (18444) only listens locally.
 
 Start bitcoind:
 
@@ -52,6 +55,34 @@ sudo apt install docker.io docker-compose-v2
 sudo usermod -aG docker $USER
 ```
 
+### 4. Firewall (recommended)
+
+Only SSH should be accessible from outside:
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow 22/tcp
+sudo ufw enable
+```
+
+## Security
+
+**Nothing is accessible from the internet except SSH (port 22).** Defense in depth:
+
+| Layer | What it does |
+|-------|--------------|
+| **ufw** | Blocks all incoming traffic except SSH |
+| **bind 127.0.0.1** | bitcoind, LND (P2P, gRPC, REST), and RTL only listen on localhost |
+| **SSH tunnel** | The only way to reach RTL or any service remotely |
+
+To verify after setup:
+
+```bash
+# Should only show port 22 on 0.0.0.0 / *
+ss -tlnp | grep -v 127.0.0
+```
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in your Bitcoin Core RPC credentials:
@@ -61,7 +92,7 @@ cp .env.example .env
 nano .env   # set BITCOIND_RPC_USER and BITCOIND_RPC_PASS
 ```
 
-See `.env.example` for all available options (ports, funding amounts, LND image, etc.).
+See `.env.example` for all available options (ports, funding amounts, LND image, RTL password, etc.).
 
 ## Usage
 
@@ -70,7 +101,7 @@ chmod +x lnd-setup.sh
 ./lnd-setup.sh
 ```
 
-The script will prompt you for a wallet password (minimum 8 characters).
+The script will prompt you for a wallet password (minimum 8 characters), or you can set `WALLET_PASS` in `.env` to skip the prompt.
 
 Run `./lnd-setup.sh --help` for a summary of what the script does.
 
@@ -79,12 +110,63 @@ Run `./lnd-setup.sh --help` for a summary of what the script does.
 | Step | Description |
 |------|-------------|
 | 1/7 | Verifies prerequisites (docker, bitcoind, bitcoin-cli) |
-| 2/7 | Installs `jq` and `curl` |
-| 3/7 | Cleans previous LND environment (bitcoind is **not touched**) |
-| 4/7 | Asks for wallet password |
-| 5/7 | Writes LND configs, `docker-compose.yml`, and starts containers |
-| 6/7 | Creates wallets via REST API, enables auto-unlock, restarts |
+| 2/7 | Installs `jq` and `curl` (skips if already installed) |
+| 3/7 | Cleans previous environment (bitcoind is **not touched**) |
+| 4/7 | Asks for wallet password (or loads from `.env`) |
+| 5/7 | Writes LND + RTL configs, `docker-compose.yml`, starts LND containers |
+| 6/7 | Creates wallets, enables auto-unlock, starts RTL |
 | 7/7 | Funds wallets, opens 5 BTC channel, balances 2.5/2.5 |
+
+## RTL (Ride The Lightning)
+
+RTL is a web UI for managing Lightning nodes. After setup completes, it's available at:
+
+```
+http://127.0.0.1:3000
+```
+
+Both LND nodes are available in the UI via a dropdown selector. The RTL password defaults to your `WALLET_PASS`. Set `RTL_PASSWORD` in `.env` to use a different one.
+
+### Accessing RTL
+
+RTL binds to `127.0.0.1` by default (localhost only, not reachable from the internet). How you access it depends on where you're running the setup:
+
+#### Local machine
+
+If you're running this on your own computer, just open `http://localhost:3000` in your browser. No extra steps needed.
+
+#### VPS — SSH tunnel (recommended)
+
+The safest way to access RTL on a remote server. Nothing is exposed to the internet.
+
+From your local machine, open the tunnel:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 user@your-vps-ip
+```
+
+Then open `http://localhost:3000` in your local browser. The tunnel stays open as long as the SSH session is active.
+
+#### VPS — Open port directly (not recommended)
+
+You can bind RTL to `0.0.0.0` so it's accessible from the internet. **This exposes RTL to anyone** — only do this if you understand the risk and have additional protections (strong password, fail2ban, etc.).
+
+To do this, edit `rtl/RTL-Config.json` after running the script and change:
+
+```json
+"host": "0.0.0.0"
+```
+
+Then allow the port through the firewall and restart:
+
+```bash
+sudo ufw allow 3000/tcp
+cd ~/BTC/lnd && docker compose restart rtl
+```
+
+#### VPS — Custom domain with reverse proxy
+
+For production-like access with HTTPS and a domain name, you can put a reverse proxy (e.g. nginx, caddy, traefik) in front of RTL. The proxy handles TLS and public access while RTL stays on `127.0.0.1`.
 
 ## Directory structure
 
@@ -99,20 +181,33 @@ Run `./lnd-setup.sh --help` for a summary of what the script does.
 │   └── data/
 │       ├── seed.txt        # 24-word mnemonic
 │       └── wallet-password.txt
-└── lnd2/
-    ├── lnd.conf
-    └── data/
-        ├── seed.txt
-        └── wallet-password.txt
+├── lnd2/
+│   ├── lnd.conf
+│   └── data/
+│       ├── seed.txt
+│       └── wallet-password.txt
+└── rtl/
+    ├── RTL-Config.json    # generated
+    └── database/
 ```
 
 ## Ports
+
+All services bind to `127.0.0.1` only (not accessible from the internet).
 
 | Service | lnd1 | lnd2 |
 |---------|------|------|
 | P2P | 9735 | 9736 |
 | gRPC | 10009 | 10010 |
 | REST | 8080 | 8081 |
+
+| Service | Port |
+|---------|------|
+| RTL web UI | 3000 |
+| bitcoind P2P | 18444 |
+| bitcoind RPC | 18443 |
+| ZMQ block | 28332 |
+| ZMQ tx | 28333 |
 
 ## Useful commands
 
@@ -123,7 +218,11 @@ docker exec lnd2 lncli --network=regtest --rpcserver=127.0.0.1:10010 getinfo
 
 # View logs
 cd ~/BTC/lnd && docker compose logs -f
+cd ~/BTC/lnd && docker compose logs -f rtl
 
 # Mine blocks
 bitcoin-cli -regtest -rpcwallet=miner generatetoaddress 1 $(bitcoin-cli -regtest -rpcwallet=miner getnewaddress)
+
+# Verify no ports exposed to the internet
+ss -tlnp | grep -v 127.0.0
 ```

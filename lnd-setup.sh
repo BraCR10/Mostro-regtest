@@ -2,10 +2,11 @@
 set -euo pipefail
 
 ###############################################################################
-#  lnd-setup.sh — Lightning Network (2 regtest nodes)
+#  lnd-setup.sh — Lightning Network (2 regtest nodes) + RTL web UI
 #
 #  Spins up 2 LND nodes on regtest using Docker (host networking),
-#  creates wallets, funds them from bitcoind, opens a channel and balances it.
+#  creates wallets, funds them from bitcoind, opens a channel, balances it,
+#  and launches RTL (Ride The Lightning) to manage both nodes.
 #
 #  Configuration: copy .env.example to .env and fill in your values.
 #  Run ./lnd-setup.sh --help for usage information.
@@ -17,15 +18,15 @@ show_usage() {
   cat <<'USAGE'
 Usage: ./lnd-setup.sh [--help]
 
-Sets up 2 LND regtest nodes with Docker (host networking).
+Sets up 2 LND regtest nodes + RTL web UI with Docker (host networking).
 
 Steps:
   1. Verifies prerequisites (docker, bitcoind, bitcoin-cli)
   2. Installs dependencies (jq, curl)
-  3. Cleans previous LND state (bitcoind is NOT touched)
+  3. Cleans previous environment (bitcoind is NOT touched)
   4. Prompts for a wallet password
-  5. Writes LND configs, docker-compose.yml, and starts containers
-  6. Creates wallets and enables auto-unlock
+  5. Writes configs, docker-compose.yml, and starts LND containers
+  6. Creates wallets, enables auto-unlock, and starts RTL
   7. Funds wallets and opens a balanced channel
 
 Configuration:
@@ -68,6 +69,9 @@ FUND_LND1_BTC="${FUND_LND1_BTC:-8}"
 FUND_LND2_BTC="${FUND_LND2_BTC:-3}"
 CHANNEL_SATS="${CHANNEL_SATS:-500000000}"
 REBALANCE_SATS="${REBALANCE_SATS:-250000000}"
+
+RTL_IMAGE="${RTL_IMAGE:-shahanafarooqui/rtl:v0.15.8}"
+RTL_PORT="${RTL_PORT:-3000}"
 
 ZMQ_BLOCK="tcp://${BITCOIND_HOST}:28332"
 ZMQ_TX="tcp://${BITCOIND_HOST}:28333"
@@ -159,6 +163,63 @@ protocol.wumbo-channels=1
 EOF
 }
 
+write_rtl_config() {
+  local rtl_pass="${RTL_PASSWORD:-${WALLET_PASS}}"
+  mkdir -p "${BASE_DIR}/rtl/database"
+  cat > "${BASE_DIR}/rtl/RTL-Config.json" <<EOF
+{
+  "multiPass": "${rtl_pass}",
+  "port": "${RTL_PORT}",
+  "host": "127.0.0.1",
+  "defaultNodeIndex": 1,
+  "dbDirectoryPath": "/RTL/database",
+  "SSO": {
+    "rtlSSO": 0,
+    "rtlCookiePath": "",
+    "logoutRedirectLink": ""
+  },
+  "nodes": [
+    {
+      "index": 1,
+      "lnNode": "lnd1",
+      "lnImplementation": "LND",
+      "authentication": {
+        "macaroonPath": "/macaroons/lnd1"
+      },
+      "settings": {
+        "userPersona": "OPERATOR",
+        "themeMode": "NIGHT",
+        "themeColor": "TEAL",
+        "channelBackupPath": "",
+        "logLevel": "ERROR",
+        "lnServerUrl": "https://127.0.0.1:${PORTS[lnd1_rest]}",
+        "fiatConversion": false,
+        "unannouncedChannels": false
+      }
+    },
+    {
+      "index": 2,
+      "lnNode": "lnd2",
+      "lnImplementation": "LND",
+      "authentication": {
+        "macaroonPath": "/macaroons/lnd2"
+      },
+      "settings": {
+        "userPersona": "OPERATOR",
+        "themeMode": "NIGHT",
+        "themeColor": "PURPLE",
+        "channelBackupPath": "",
+        "logLevel": "ERROR",
+        "lnServerUrl": "https://127.0.0.1:${PORTS[lnd2_rest]}",
+        "fiatConversion": false,
+        "unannouncedChannels": false
+      }
+    }
+  ]
+}
+EOF
+}
+
 create_wallet_rest() {
   local node="$1"
   local rest_port="${PORTS[${node}_rest]}"
@@ -244,13 +305,13 @@ step_deps() {
 }
 
 ###############################################################################
-#  STEP 3 — Clean LND environment (bitcoind untouched)
+#  STEP 3 — Clean environment (bitcoind untouched)
 ###############################################################################
 step_clean() {
-  log "3/7" "Cleaning LND environment (bitcoind NOT touched)"
+  log "3/7" "Cleaning environment (bitcoind NOT touched)"
 
   docker compose -f "${BASE_DIR}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
-  docker rm -f "${NODES[@]}" 2>/dev/null || true
+  docker rm -f "${NODES[@]}" rtl 2>/dev/null || true
 
   for node in "${NODES[@]}"; do
     if [[ -d "${BASE_DIR}/${node}" ]]; then
@@ -259,6 +320,7 @@ step_clean() {
       rm -rf "${BASE_DIR:?}/${node}" 2>/dev/null || true
     fi
   done
+  rm -rf "${BASE_DIR}/rtl" 2>/dev/null || true
   rm -f "${BASE_DIR}/docker-compose.yml" 2>/dev/null || true
 
   for node in "${NODES[@]}"; do
@@ -300,15 +362,18 @@ step_password() {
 }
 
 ###############################################################################
-#  STEP 5 — Write configs + start containers
+#  STEP 5 — Write configs + start LND containers
 ###############################################################################
 step_configs_and_start() {
-  log "5/7" "Writing configs and starting containers"
+  log "5/7" "Writing configs and starting LND containers"
 
   for node in "${NODES[@]}"; do
     write_lnd_conf "$node"
   done
   ok "LND configs written"
+
+  write_rtl_config
+  ok "RTL config written"
 
   cat > "${BASE_DIR}/docker-compose.yml" <<EOF
 services:
@@ -329,19 +394,32 @@ services:
     volumes:
       - ./lnd2/data:/root/.lnd
       - ./lnd2/lnd.conf:/root/.lnd/lnd.conf:ro
+
+  rtl:
+    image: ${RTL_IMAGE}
+    container_name: rtl
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      RTL_CONFIG_PATH: /RTL
+    volumes:
+      - ./rtl/RTL-Config.json:/RTL/RTL-Config.json
+      - ./rtl/database:/RTL/database
+      - ./lnd1/data/data/chain/bitcoin/regtest:/macaroons/lnd1:ro
+      - ./lnd2/data/data/chain/bitcoin/regtest:/macaroons/lnd2:ro
 EOF
   ok "docker-compose.yml written"
 
-  docker compose -f "${BASE_DIR}/docker-compose.yml" up -d
+  docker compose -f "${BASE_DIR}/docker-compose.yml" up -d lnd1 lnd2
   sleep 3
   ok "lnd1 and lnd2 running"
 }
 
 ###############################################################################
-#  STEP 6 — Create wallets + enable auto-unlock + restart
+#  STEP 6 — Create wallets + enable auto-unlock + start RTL
 ###############################################################################
 step_wallets_and_unlock() {
-  log "6/7" "Creating wallets and enabling auto-unlock"
+  log "6/7" "Creating wallets, enabling auto-unlock, starting RTL"
 
   for node in "${NODES[@]}"; do
     create_wallet_rest "$node"
@@ -353,13 +431,16 @@ step_wallets_and_unlock() {
     write_lnd_conf "$node" "wallet-unlock-password-file=/root/.lnd/wallet-password.txt"
   done
 
-  docker compose -f "${BASE_DIR}/docker-compose.yml" restart
+  docker compose -f "${BASE_DIR}/docker-compose.yml" restart lnd1 lnd2
   sleep 5
 
   for node in "${NODES[@]}"; do
     wait_ready "$node" || fail "${node} not responding after restart"
   done
   ok "Both nodes unlocked and ready"
+
+  docker compose -f "${BASE_DIR}/docker-compose.yml" up -d rtl
+  ok "RTL started on http://127.0.0.1:${RTL_PORT}"
 }
 
 ###############################################################################
@@ -414,6 +495,11 @@ show_summary() {
   echo "  Seeds saved at:"
   echo "    ${BASE_DIR}/lnd1/data/seed.txt"
   echo "    ${BASE_DIR}/lnd2/data/seed.txt"
+  echo
+  echo "  RTL web UI:"
+  echo "    http://127.0.0.1:${RTL_PORT}"
+  echo "    Password: (your WALLET_PASS or RTL_PASSWORD from .env)"
+  echo "    SSH tunnel: ssh -L ${RTL_PORT}:127.0.0.1:${RTL_PORT} user@your-vps"
   echo
 
   echo "  Channel balances:"
