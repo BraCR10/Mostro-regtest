@@ -1,36 +1,36 @@
-# LNURL y Lightning Address
+# LNURL and Lightning Address
 
-## Que es LNURL
+## What is LNURL
 
-[LNURL](https://github.com/lnurl/luds) es un protocolo UX sobre Lightning Network que reemplaza los invoices de un solo uso por interacciones reutilizables: pagar, recibir, autenticarse, todo desde un QR estatico o una URL fija.
+[LNURL](https://github.com/lnurl/luds) is a UX protocol on top of Lightning Network that replaces single-use invoices with reusable interactions: pay, receive, authenticate — all from a static QR code or a fixed URL.
 
-Sub-protocolos principales:
+Main sub-protocols:
 
-| Protocolo | Que hace |
-|-----------|----------|
-| **lnurl-pay** (LUD-06) | El remitente escanea un QR/link y el servidor genera un invoice BOLT11 en el momento |
-| **lnurl-withdraw** | El receptor escanea un QR y "retira" sats de un servicio |
-| **lnurl-auth** | Login sin password — firma con la llave del nodo |
-| **lightning address** (LUD-16) | Direccion legible tipo `usuario@dominio.com` que internamente resuelve a lnurl-pay |
+| Protocol | What it does |
+|----------|-------------|
+| **lnurl-pay** (LUD-06) | Sender scans a QR/link and the server generates a BOLT11 invoice on the spot |
+| **lnurl-withdraw** | Receiver scans a QR and "withdraws" sats from a service |
+| **lnurl-auth** | Passwordless login — signs with the node key |
+| **lightning address** (LUD-16) | Human-readable address like `user@domain.com` that internally resolves to lnurl-pay |
 
-## Que es una Lightning Address
+## What is a Lightning Address
 
-Una Lightning Address funciona igual que un email pero para recibir Bitcoin. En vez de compartir un invoice de 200 caracteres, compartes algo como:
-
-```
-satoshi@tudominio.com
-```
-
-Cuando alguien paga a esa direccion, su wallet hace internamente:
-
-1. Toma `satoshi@tudominio.com` y hace un GET a `https://tudominio.com/.well-known/lnurlp/satoshi`
-2. Tu servidor responde con un JSON (callback URL, montos min/max, metadata)
-3. El wallet llama al callback con el monto elegido
-4. Tu servidor genera un invoice BOLT11 desde tu nodo LND y lo devuelve
-5. El wallet paga el invoice
+A Lightning Address works like an email address but for receiving Bitcoin. Instead of sharing a 200-character invoice, you share something like:
 
 ```
-Wallet del pagador                    Tu servidor + LND
+satoshi@yourdomain.com
+```
+
+When someone pays that address, their wallet internally:
+
+1. Takes `satoshi@yourdomain.com` and makes a GET to `https://yourdomain.com/.well-known/lnurlp/satoshi`
+2. Your server responds with JSON (callback URL, min/max amounts, metadata)
+3. The wallet calls the callback with the chosen amount
+4. Your server generates a BOLT11 invoice from your LND node and returns it
+5. The wallet pays the invoice
+
+```
+Payer's wallet                        Your server + LND
        |                                      |
        |  GET /.well-known/lnurlp/satoshi      |
        |  -----------------------------------> |
@@ -44,86 +44,86 @@ Wallet del pagador                    Tu servidor + LND
        |  { pr: "lnbc500n1..." }               |
        |  <----------------------------------- |
        |                                      |
-       |  Paga el invoice BOLT11               |
+       |  Pays the BOLT11 invoice              |
        |  -----------------------------------> |
 ```
 
-## Que necesitas
+## What you need
 
-### 1. Un dominio
+### 1. A domain
 
-Necesitas comprar un dominio (puede ser en [Namecheap](https://www.namecheap.com/), Porkbun, Cloudflare, etc.). El dominio es lo que va despues del `@` en tu Lightning Address.
+You need to buy a domain (can be from [Namecheap](https://www.namecheap.com/), Porkbun, Cloudflare, etc.). The domain is what goes after the `@` in your Lightning Address.
 
-**Lo unico que haces con el dominio es apuntar el DNS a tu servidor** — no hay configuracion compleja, solo un registro A:
+**All you do with the domain is point the DNS to your server** — no complex configuration, just an A record:
 
 ```
-Tipo: A
-Host: @    (o el subdominio que quieras)
-Valor: IP_DE_TU_VPS
+Type: A
+Host: @    (or the subdomain you want)
+Value: YOUR_VPS_IP
 TTL: Automatic
 ```
 
-Si quieres usar un subdominio (ej. `ln.tudominio.com`):
+If you want to use a subdomain (e.g. `ln.yourdomain.com`):
 
 ```
-Tipo: A
+Type: A
 Host: ln
-Valor: IP_DE_TU_VPS
+Value: YOUR_VPS_IP
 TTL: Automatic
 ```
 
-### 2. HTTPS (certificado SSL)
+### 2. HTTPS (SSL certificate)
 
-LNURL requiere HTTPS obligatoriamente. La opcion mas simple es [Caddy](https://caddyserver.com/) como reverse proxy — obtiene certificados de Let's Encrypt automaticamente:
+LNURL requires HTTPS. The simplest option is [Caddy](https://caddyserver.com/) as a reverse proxy — it obtains Let's Encrypt certificates automatically:
 
 ```
-tudominio.com {
+yourdomain.com {
     reverse_proxy 127.0.0.1:8080
 }
 ```
 
-Alternativamente puedes usar nginx + certbot.
+Alternatively you can use nginx + certbot.
 
-### 3. Un servidor LNURL
+### 3. An LNURL server
 
-El servidor recibe las peticiones HTTP en `/.well-known/lnurlp/<usuario>` y genera invoices desde tu nodo LND. La libreria [lnurl-rs](https://github.com/benthecarman/lnurl-rs) implementa el protocolo completo en Rust.
+The server receives HTTP requests at `/.well-known/lnurlp/<username>` and generates invoices from your LND node. The [lnurl-rs](https://github.com/benthecarman/lnurl-rs) library implements the full protocol in Rust.
 
-## Respuesta del endpoint
+## Endpoint response
 
-El endpoint `GET https://tudominio.com/.well-known/lnurlp/usuario` debe devolver:
+The endpoint `GET https://yourdomain.com/.well-known/lnurlp/username` must return:
 
 ```json
 {
   "status": "OK",
   "tag": "payRequest",
-  "callback": "https://tudominio.com/lnurl/pay/usuario",
+  "callback": "https://yourdomain.com/lnurl/pay/username",
   "minSendable": 1000,
   "maxSendable": 100000000,
-  "metadata": "[[\"text/plain\",\"Pago a usuario\"]]",
+  "metadata": "[[\"text/plain\",\"Payment to username\"]]",
   "commentAllowed": 140
 }
 ```
 
-- `minSendable` / `maxSendable` en **millisatoshis** (1000 msat = 1 sat)
-- `callback` es la URL que el wallet llama con `?amount=<msat>` para obtener el invoice BOLT11
-- `metadata` es un JSON-string con al menos `text/plain`
+- `minSendable` / `maxSendable` in **millisatoshis** (1000 msat = 1 sat)
+- `callback` is the URL the wallet calls with `?amount=<msat>` to get the BOLT11 invoice
+- `metadata` is a JSON-string with at least `text/plain`
 
-## Resumen del flujo
+## Flow summary
 
 ```
-[Comprar dominio] --> [DNS: A record apuntando a tu VPS]
+[Buy domain] --> [DNS: A record pointing to your VPS]
                             |
                             v
-                  [Reverse proxy con HTTPS]
-                     (Caddy o nginx)
+                  [Reverse proxy with HTTPS]
+                     (Caddy or nginx)
                             |
                             v
-                  [Servidor LNURL en tu VPS]
+                  [LNURL server on your VPS]
                    /.well-known/lnurlp/*
                             |
                             v
-                     [Tu nodo LND]
-                  (genera invoices BOLT11)
+                     [Your LND node]
+                  (generates BOLT11 invoices)
 ```
 
-La parte pesada (nodo LND, canales, liquidez) ya la tienes con este setup. El servidor LNURL es solo el puente HTTP que convierte peticiones web en invoices de tu nodo.
+The heavy part (LND node, channels, liquidity) is already in place with this setup. The LNURL server is just the HTTP bridge that converts web requests into invoices from your node.

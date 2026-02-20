@@ -37,7 +37,7 @@ The script will prompt for a wallet password (min 8 chars), or set `WALLET_PASS`
 - [Mostro](docs/mostro.md) — P2P exchange setup, Nostr key options
 - [Security](docs/security.md) — defense-in-depth, port verification
 - [Commands](docs/commands.md) — lncli, logs, mining, Docker management
-- [LNURL y Lightning Address](docs/lnurl.md) — dominio, DNS, como funciona el protocolo
+- [LNURL and Lightning Address](docs/lnurl.md) — domain, DNS, how the protocol works
 
 ## Useful commands
 
