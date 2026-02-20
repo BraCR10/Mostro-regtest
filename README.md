@@ -1,6 +1,6 @@
 # LND Regtest Setup
 
-Automated script that spins up 2 Lightning Network (LND) nodes on regtest, creates wallets, funds them from bitcoind, opens a 5 BTC channel, balances it 2.5/2.5, and launches [RTL (Ride The Lightning)](https://github.com/Ride-The-Lightning/RTL) to manage both nodes from a web UI.
+Automated script that spins up 2 Lightning Network (LND) nodes on regtest, creates wallets, funds them from bitcoind, opens a 5 BTC channel, balances it 2.5/2.5, launches [RTL (Ride The Lightning)](https://github.com/Ride-The-Lightning/RTL) to manage both nodes, and starts [Mostro](https://github.com/MostroP2P/mostro) (P2P Lightning exchange over Nostr) on lnd1.
 
 ## Prerequisites
 
@@ -48,12 +48,7 @@ bitcoin-cli -regtest -rpcwallet=miner generatetoaddress 101 $(bitcoin-cli -regte
 
 ### 3. Docker
 
-Docker and Docker Compose must be installed.
-
-```bash
-sudo apt install docker.io docker-compose-v2
-sudo usermod -aG docker $USER
-```
+Docker and Docker Compose must be installed: https://docs.docker.com/engine/install/
 
 ### 4. Firewall (recommended)
 
@@ -73,7 +68,7 @@ sudo ufw enable
 | Layer | What it does |
 |-------|--------------|
 | **ufw** | Blocks all incoming traffic except SSH |
-| **bind 127.0.0.1** | bitcoind, LND (P2P, gRPC, REST), and RTL only listen on localhost |
+| **bind 127.0.0.1** | bitcoind, LND, RTL, Nostr relay, and Mostro only listen on localhost |
 | **SSH tunnel** | The only way to reach RTL or any service remotely |
 
 To verify after setup:
@@ -92,7 +87,7 @@ cp .env.example .env
 nano .env   # set BITCOIND_RPC_USER and BITCOIND_RPC_PASS
 ```
 
-See `.env.example` for all available options (ports, funding amounts, LND image, RTL password, etc.).
+See `.env.example` for all available options (ports, funding amounts, LND image, RTL password, Mostro key, etc.).
 
 ## Usage
 
@@ -109,13 +104,14 @@ Run `./lnd-setup.sh --help` for a summary of what the script does.
 
 | Step | Description |
 |------|-------------|
-| 1/7 | Verifies prerequisites (docker, bitcoind, bitcoin-cli) |
-| 2/7 | Installs `jq` and `curl` (skips if already installed) |
-| 3/7 | Cleans previous environment (bitcoind is **not touched**) |
-| 4/7 | Asks for wallet password (or loads from `.env`) |
-| 5/7 | Writes LND + RTL configs, `docker-compose.yml`, starts LND containers |
-| 6/7 | Creates wallets, enables auto-unlock, starts RTL |
-| 7/7 | Funds wallets, opens 5 BTC channel, balances 2.5/2.5 |
+| 1/8 | Verifies prerequisites (docker, bitcoind, bitcoin-cli) |
+| 2/8 | Installs `jq` and `curl` (skips if already installed) |
+| 3/8 | Cleans previous environment (bitcoind is **not touched**) |
+| 4/8 | Asks for wallet password (or loads from `.env`) |
+| 5/8 | Writes LND + RTL + relay configs, `docker-compose.yml`, starts LND |
+| 6/8 | Creates wallets, enables auto-unlock, starts RTL and Nostr relay |
+| 7/8 | Sets up Mostro: loads/prompts/generates Nostr key, starts Mostro on lnd1 |
+| 8/8 | Funds wallets, opens 5 BTC channel, balances 2.5/2.5 |
 
 ## RTL (Ride The Lightning)
 
@@ -168,6 +164,20 @@ cd ~/BTC/lnd && docker compose restart rtl
 
 For production-like access with HTTPS and a domain name, you can put a reverse proxy (e.g. nginx, caddy, traefik) in front of RTL. The proxy handles TLS and public access while RTL stays on `127.0.0.1`.
 
+## Mostro (P2P exchange)
+
+[Mostro](https://github.com/MostroP2P/mostro) is a P2P Bitcoin trading daemon over the Nostr protocol. It runs on lnd1 and uses a local Nostr relay.
+
+### Nostr key
+
+Mostro needs a Nostr identity (nsec private key). The script handles this in three ways:
+
+1. **From `.env`** — set `MOSTRO_NSEC_PRIVKEY=nsec1...` to skip prompts entirely
+2. **Interactive prompt** — paste your existing nsec key when asked
+3. **Auto-generate with rana** — press Enter at the prompt to build [rana](https://github.com/grunch/rana) and generate a new keypair (first build takes a few minutes)
+
+The private key is saved to `mostro/nostr-private.txt` (chmod 600). The public key (npub) is displayed on screen at the end of setup.
+
 ## Directory structure
 
 ```
@@ -186,9 +196,14 @@ For production-like access with HTTPS and a domain name, you can put a reverse p
 │   └── data/
 │       ├── seed.txt
 │       └── wallet-password.txt
-└── rtl/
-    ├── RTL-Config.json    # generated
-    └── database/
+├── rtl/
+│   ├── RTL-Config.json    # generated
+│   └── database/
+└── mostro/
+    ├── settings.toml       # generated
+    ├── nostr-private.txt   # nsec key (chmod 600)
+    ├── relay-config.toml   # Nostr relay config
+    └── relay-data/
 ```
 
 ## Ports
@@ -204,6 +219,7 @@ All services bind to `127.0.0.1` only (not accessible from the internet).
 | Service | Port |
 |---------|------|
 | RTL web UI | 3000 |
+| Nostr relay | 7000 |
 | bitcoind P2P | 18444 |
 | bitcoind RPC | 18443 |
 | ZMQ block | 28332 |
@@ -219,6 +235,7 @@ docker exec lnd2 lncli --network=regtest --rpcserver=127.0.0.1:10010 getinfo
 # View logs
 cd ~/BTC/lnd && docker compose logs -f
 cd ~/BTC/lnd && docker compose logs -f rtl
+cd ~/BTC/lnd && docker compose logs -f mostro
 
 # Mine blocks
 bitcoin-cli -regtest -rpcwallet=miner generatetoaddress 1 $(bitcoin-cli -regtest -rpcwallet=miner getnewaddress)

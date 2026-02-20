@@ -2,11 +2,12 @@
 set -euo pipefail
 
 ###############################################################################
-#  lnd-setup.sh — Lightning Network (2 regtest nodes) + RTL web UI
+#  lnd-setup.sh — Lightning Network (2 regtest nodes) + RTL + Mostro
 #
 #  Spins up 2 LND nodes on regtest using Docker (host networking),
 #  creates wallets, funds them from bitcoind, opens a channel, balances it,
-#  and launches RTL (Ride The Lightning) to manage both nodes.
+#  launches RTL (Ride The Lightning) to manage both nodes, and starts
+#  Mostro (P2P Lightning exchange over Nostr) connected to lnd1.
 #
 #  Configuration: copy .env.example to .env and fill in your values.
 #  Run ./lnd-setup.sh --help for usage information.
@@ -18,7 +19,7 @@ show_usage() {
   cat <<'USAGE'
 Usage: ./lnd-setup.sh [--help]
 
-Sets up 2 LND regtest nodes + RTL web UI with Docker (host networking).
+Sets up 2 LND regtest nodes + RTL + Mostro with Docker (host networking).
 
 Steps:
   1. Verifies prerequisites (docker, bitcoind, bitcoin-cli)
@@ -26,8 +27,9 @@ Steps:
   3. Cleans previous environment (bitcoind is NOT touched)
   4. Prompts for a wallet password
   5. Writes configs, docker-compose.yml, and starts LND containers
-  6. Creates wallets, enables auto-unlock, and starts RTL
-  7. Funds wallets and opens a balanced channel
+  6. Creates wallets, enables auto-unlock, starts RTL and Nostr relay
+  7. Generates Nostr keys (rana), configures and starts Mostro on lnd1
+  8. Funds wallets and opens a balanced channel
 
 Configuration:
   Copy .env.example to .env and set BITCOIND_RPC_USER and BITCOIND_RPC_PASS
@@ -73,6 +75,10 @@ REBALANCE_SATS="${REBALANCE_SATS:-250000000}"
 RTL_IMAGE="${RTL_IMAGE:-shahanafarooqui/rtl:v0.15.8}"
 RTL_PORT="${RTL_PORT:-3000}"
 
+MOSTRO_IMAGE="${MOSTRO_IMAGE:-mostrop2p/mostro:v0.16.3}"
+MOSTRO_RELAY_IMAGE="${MOSTRO_RELAY_IMAGE:-scsibug/nostr-rs-relay}"
+MOSTRO_RELAY_PORT="${MOSTRO_RELAY_PORT:-7000}"
+
 ZMQ_BLOCK="tcp://${BITCOIND_HOST}:28332"
 ZMQ_TX="tcp://${BITCOIND_HOST}:28333"
 
@@ -87,6 +93,8 @@ declare -A FUND_BTC=(
 )
 
 WALLET_PASS="${WALLET_PASS:-}"
+MOSTRO_NSEC=""
+MOSTRO_NPUB=""
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -220,6 +228,105 @@ write_rtl_config() {
 EOF
 }
 
+write_relay_config() {
+  mkdir -p "${BASE_DIR}/mostro/relay-data"
+  cat > "${BASE_DIR}/mostro/relay-config.toml" <<EOF
+[info]
+name = "Local Mostro Relay"
+
+[network]
+port = ${MOSTRO_RELAY_PORT}
+address = "127.0.0.1"
+
+[limits]
+max_event_bytes = 131072
+EOF
+}
+
+write_mostro_config() {
+  mkdir -p "${BASE_DIR}/mostro/lnd"
+  cat > "${BASE_DIR}/mostro/settings.toml" <<EOF
+[lightning]
+lnd_cert_file = '/config/lnd/tls.cert'
+lnd_macaroon_file = '/config/lnd/admin.macaroon'
+lnd_grpc_host = 'https://127.0.0.1:${PORTS[lnd1_rpc]}'
+invoice_expiration_window = 3600
+hold_invoice_cltv_delta = 144
+hold_invoice_expiration_window = 300
+payment_attempts = 3
+payment_retries_interval = 60
+
+[nostr]
+nsec_privkey = '${MOSTRO_NSEC}'
+relays = ['ws://127.0.0.1:${MOSTRO_RELAY_PORT}']
+
+[mostro]
+fee = 0
+max_routing_fee = 0.001
+max_order_amount = 1000000
+min_payment_amount = 100
+expiration_hours = 24
+max_expiration_days = 15
+expiration_seconds = 900
+user_rates_sent_interval_seconds = 3600
+publish_relays_interval = 60
+pow = 0
+publish_mostro_info_interval = 300
+bitcoin_price_api_url = "https://api.yadio.io"
+fiat_currencies_accepted = ['USD', 'EUR', 'ARS', 'CUP']
+max_orders_per_response = 10
+dev_fee_percentage = 0.30
+
+[database]
+url = "sqlite:///config/mostro.db"
+
+[expiration]
+order_days = 30
+dispute_days = 90
+fee_audit_days = 365
+
+[rpc]
+enabled = false
+listen_address = "127.0.0.1"
+port = 50051
+EOF
+}
+
+generate_nostr_keys() {
+  echo "  Building rana (Nostr key generator)... this may take a few minutes on first run"
+  local build_dir
+  build_dir="$(mktemp -d)"
+  cat > "${build_dir}/Dockerfile" <<'DOCKERFILE'
+FROM rust:1.84-slim AS builder
+RUN apt-get update && apt-get install -y cmake build-essential pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN cargo install rana --locked
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /usr/local/cargo/bin/rana /usr/local/bin/rana
+ENTRYPOINT ["rana"]
+DOCKERFILE
+
+  docker build -t rana -f "${build_dir}/Dockerfile" "${build_dir}" -q >/dev/null
+  rm -rf "${build_dir}"
+  ok "rana image ready"
+
+  echo "  Generating Nostr keypair..."
+  docker rm -f rana-gen >/dev/null 2>&1 || true
+  docker run -d --name rana-gen rana --difficulty 1 >/dev/null
+  sleep 8
+
+  local output
+  output="$(docker logs rana-gen 2>&1)"
+  docker rm -f rana-gen >/dev/null 2>&1
+
+  MOSTRO_NSEC="$(echo "$output" | grep -oP 'nsec1[a-z0-9]+' | head -1)"
+  MOSTRO_NPUB="$(echo "$output" | grep -oP 'npub1[a-z0-9]+' | head -1)"
+
+  if [[ -z "$MOSTRO_NSEC" || -z "$MOSTRO_NPUB" ]]; then
+    fail "Could not generate Nostr keys — rana output: ${output}"
+  fi
+}
+
 create_wallet_rest() {
   local node="$1"
   local rest_port="${PORTS[${node}_rest]}"
@@ -260,7 +367,7 @@ create_wallet_rest() {
 #  STEP 1 — Preflight checks
 ###############################################################################
 step_preflight() {
-  log "1/7" "Preflight checks"
+  log "1/8" "Preflight checks"
 
   if ! command -v docker &>/dev/null; then
     fail "docker is not installed (sudo apt install docker.io)"
@@ -285,7 +392,7 @@ step_preflight() {
 #  STEP 2 — Dependencies
 ###############################################################################
 step_deps() {
-  log "2/7" "Checking dependencies (jq, curl)"
+  log "2/8" "Checking dependencies (jq, curl)"
 
   local missing=()
   for cmd in jq curl; do
@@ -308,10 +415,10 @@ step_deps() {
 #  STEP 3 — Clean environment (bitcoind untouched)
 ###############################################################################
 step_clean() {
-  log "3/7" "Cleaning environment (bitcoind NOT touched)"
+  log "3/8" "Cleaning environment (bitcoind NOT touched)"
 
   docker compose -f "${BASE_DIR}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
-  docker rm -f "${NODES[@]}" rtl 2>/dev/null || true
+  docker rm -f "${NODES[@]}" rtl nostr-relay mostro 2>/dev/null || true
 
   for node in "${NODES[@]}"; do
     if [[ -d "${BASE_DIR}/${node}" ]]; then
@@ -320,7 +427,7 @@ step_clean() {
       rm -rf "${BASE_DIR:?}/${node}" 2>/dev/null || true
     fi
   done
-  rm -rf "${BASE_DIR}/rtl" 2>/dev/null || true
+  rm -rf "${BASE_DIR}/rtl" "${BASE_DIR}/mostro" 2>/dev/null || true
   rm -f "${BASE_DIR}/docker-compose.yml" 2>/dev/null || true
 
   for node in "${NODES[@]}"; do
@@ -333,7 +440,7 @@ step_clean() {
 #  STEP 4 — Ask wallet password
 ###############################################################################
 step_password() {
-  log "4/7" "Wallet password for LND"
+  log "4/8" "Wallet password for LND"
 
   if [[ -n "${WALLET_PASS:-}" ]] && (( ${#WALLET_PASS} >= 8 )); then
     ok "Password loaded from .env"
@@ -365,7 +472,7 @@ step_password() {
 #  STEP 5 — Write configs + start LND containers
 ###############################################################################
 step_configs_and_start() {
-  log "5/7" "Writing configs and starting LND containers"
+  log "5/8" "Writing configs and starting LND containers"
 
   for node in "${NODES[@]}"; do
     write_lnd_conf "$node"
@@ -374,6 +481,9 @@ step_configs_and_start() {
 
   write_rtl_config
   ok "RTL config written"
+
+  write_relay_config
+  ok "Nostr relay config written"
 
   cat > "${BASE_DIR}/docker-compose.yml" <<EOF
 services:
@@ -407,6 +517,25 @@ services:
       - ./rtl/database:/RTL/database
       - ./lnd1/data/data/chain/bitcoin/regtest:/macaroons/lnd1:ro
       - ./lnd2/data/data/chain/bitcoin/regtest:/macaroons/lnd2:ro
+
+  nostr-relay:
+    image: ${MOSTRO_RELAY_IMAGE}
+    container_name: nostr-relay
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./mostro/relay-config.toml:/usr/src/app/config.toml:ro
+      - ./mostro/relay-data:/usr/src/app/db
+
+  mostro:
+    image: ${MOSTRO_IMAGE}
+    container_name: mostro
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./mostro:/config
+      - ./lnd1/data/tls.cert:/config/lnd/tls.cert:ro
+      - ./lnd1/data/data/chain/bitcoin/regtest/admin.macaroon:/config/lnd/admin.macaroon:ro
 EOF
   ok "docker-compose.yml written"
 
@@ -416,10 +545,10 @@ EOF
 }
 
 ###############################################################################
-#  STEP 6 — Create wallets + enable auto-unlock + start RTL
+#  STEP 6 — Create wallets + enable auto-unlock + start RTL & relay
 ###############################################################################
 step_wallets_and_unlock() {
-  log "6/7" "Creating wallets, enabling auto-unlock, starting RTL"
+  log "6/8" "Creating wallets, enabling auto-unlock, starting RTL"
 
   for node in "${NODES[@]}"; do
     create_wallet_rest "$node"
@@ -439,15 +568,60 @@ step_wallets_and_unlock() {
   done
   ok "Both nodes unlocked and ready"
 
-  docker compose -f "${BASE_DIR}/docker-compose.yml" up -d rtl
+  docker compose -f "${BASE_DIR}/docker-compose.yml" up -d rtl nostr-relay
   ok "RTL started on http://127.0.0.1:${RTL_PORT}"
+  ok "Nostr relay started on ws://127.0.0.1:${MOSTRO_RELAY_PORT}"
 }
 
 ###############################################################################
-#  STEP 7 — Fund wallets + open channel + rebalance
+#  STEP 7 — Generate Nostr keys + configure and start Mostro
+###############################################################################
+step_mostro() {
+  log "7/8" "Setting up Mostro (P2P exchange on lnd1)"
+
+  mkdir -p "${BASE_DIR}/mostro"
+
+  if [[ -n "${MOSTRO_NSEC_PRIVKEY:-}" ]]; then
+    # Option 1: key from .env
+    MOSTRO_NSEC="${MOSTRO_NSEC_PRIVKEY}"
+    ok "Nostr private key loaded from .env"
+  else
+    # Option 2: ask the user
+    echo
+    read -p "  Enter your Nostr private key (nsec1...) or press Enter to generate one: " user_nsec
+    if [[ -n "$user_nsec" ]]; then
+      MOSTRO_NSEC="${user_nsec}"
+      ok "Nostr private key provided"
+    else
+      # Option 3: generate with rana
+      generate_nostr_keys
+    fi
+  fi
+
+  echo "${MOSTRO_NSEC}" > "${BASE_DIR}/mostro/nostr-private.txt"
+  chmod 600 "${BASE_DIR}/mostro/nostr-private.txt"
+  ok "Private key saved to mostro/nostr-private.txt"
+
+  write_mostro_config
+  ok "Mostro settings.toml written"
+
+  docker compose -f "${BASE_DIR}/docker-compose.yml" up -d mostro
+  sleep 3
+  ok "Mostro started (connected to lnd1)"
+
+  if [[ -n "${MOSTRO_NPUB}" ]]; then
+    echo
+    echo -e "  \033[1;33mMostro public key (npub):\033[0m"
+    echo -e "  \033[1;32m${MOSTRO_NPUB}\033[0m"
+    echo
+  fi
+}
+
+###############################################################################
+#  STEP 8 — Fund wallets + open channel + rebalance
 ###############################################################################
 step_fund_and_channel() {
-  log "7/7" "Funding wallets and opening channel"
+  log "8/8" "Funding wallets and opening channel"
 
   if ! bcli listwallets | jq -e ".[] | select(.==\"${MINER_WALLET}\")" >/dev/null 2>&1; then
     if bcli listwalletdir | jq -e ".wallets[].name | select(.==\"${MINER_WALLET}\")" >/dev/null 2>&1; then
@@ -498,8 +672,12 @@ show_summary() {
   echo
   echo "  RTL web UI:"
   echo "    http://127.0.0.1:${RTL_PORT}"
-  echo "    Password: (your WALLET_PASS or RTL_PASSWORD from .env)"
   echo "    SSH tunnel: ssh -L ${RTL_PORT}:127.0.0.1:${RTL_PORT} user@your-vps"
+  echo
+  echo "  Mostro (P2P exchange on lnd1):"
+  echo "    Nostr relay: ws://127.0.0.1:${MOSTRO_RELAY_PORT}"
+  echo "    Public key:  ${MOSTRO_NPUB}"
+  echo "    Private key: ${BASE_DIR}/mostro/nostr-private.txt"
   echo
 
   echo "  Channel balances:"
@@ -513,6 +691,7 @@ show_summary() {
   echo "    lncli1:  docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd1_rpc]} <cmd>"
   echo "    lncli2:  docker exec lnd2 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd2_rpc]} <cmd>"
   echo "    logs:    cd ${BASE_DIR} && docker compose logs -f"
+  echo "    mostro:  cd ${BASE_DIR} && docker compose logs -f mostro"
   echo
 }
 
@@ -525,6 +704,7 @@ main() {
   step_password
   step_configs_and_start
   step_wallets_and_unlock
+  step_mostro
   step_fund_and_channel
   show_summary
 }
