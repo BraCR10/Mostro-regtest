@@ -4,10 +4,10 @@ set -euo pipefail
 ###############################################################################
 #  setup.sh — Mostro Regtest
 #
-#  Spins up 2 LND nodes on regtest using Docker (host networking),
-#  creates wallets, funds them from bitcoind, opens a channel, balances it,
-#  launches RTL (Ride The Lightning) to manage both nodes, and starts
-#  Mostro (P2P Lightning exchange over Nostr) connected to lnd1.
+#  Spins up 3 LND nodes on regtest using Docker (host networking),
+#  creates wallets, funds them from bitcoind, opens channels (triangle
+#  topology), launches RTL (Ride The Lightning) to manage all nodes, and
+#  starts Mostro (P2P Lightning exchange over Nostr) connected to lnd1.
 #
 #  Configuration: copy .env.example to .env and fill in your values.
 #  Run ./setup.sh --help for usage information.
@@ -19,7 +19,7 @@ show_usage() {
   cat <<'USAGE'
 Usage: ./setup.sh [--help]
 
-Mostro Regtest — sets up 2 LND regtest nodes + RTL + Mostro with Docker.
+Mostro Regtest — sets up 3 LND regtest nodes + RTL + Mostro with Docker.
 
 Steps:
   1. Verifies prerequisites (docker, bitcoind, bitcoin-cli)
@@ -79,8 +79,10 @@ MINER_WALLET="${MINER_WALLET:-miner}"
 LND_IMAGE="${LND_IMAGE:-lightninglabs/lnd:v0.20.1-beta}"
 FUND_LND1_BTC="${FUND_LND1_BTC:-8}"
 FUND_LND2_BTC="${FUND_LND2_BTC:-3}"
+FUND_LND3_BTC="${FUND_LND3_BTC:-6}"
 CHANNEL_SATS="${CHANNEL_SATS:-500000000}"
 REBALANCE_SATS="${REBALANCE_SATS:-250000000}"
+LND3_CHANNEL_SATS="${LND3_CHANNEL_SATS:-250000000}"
 
 RTL_IMAGE="${RTL_IMAGE:-shahanafarooqui/rtl:v0.15.8}"
 RTL_PORT="${RTL_PORT:-3000}"
@@ -92,14 +94,16 @@ MOSTRO_RELAYS="${MOSTRO_RELAYS:-wss://nos.lol,wss://relay.mostro.network}"
 ZMQ_BLOCK="tcp://${BITCOIND_HOST}:28332"
 ZMQ_TX="tcp://${BITCOIND_HOST}:28333"
 
-NODES=(lnd1 lnd2)
+NODES=(lnd1 lnd2 lnd3)
 declare -A PORTS=(
   [lnd1_listen]=9735  [lnd1_rpc]=10009  [lnd1_rest]=8080
   [lnd2_listen]=9736  [lnd2_rpc]=10010  [lnd2_rest]=8081
+  [lnd3_listen]=9737  [lnd3_rpc]=10011  [lnd3_rest]=8082
 )
 declare -A FUND_BTC=(
   [lnd1]="${FUND_LND1_BTC}"
   [lnd2]="${FUND_LND2_BTC}"
+  [lnd3]="${FUND_LND3_BTC}"
 )
 
 LNURL_DOMAIN="${LNURL_DOMAIN:-}"
@@ -245,6 +249,24 @@ write_rtl_config() {
         "channelBackupPath": "",
         "logLevel": "ERROR",
         "lnServerUrl": "https://127.0.0.1:${PORTS[lnd2_rest]}",
+        "fiatConversion": false,
+        "unannouncedChannels": false
+      }
+    },
+    {
+      "index": 3,
+      "lnNode": "lnd3",
+      "lnImplementation": "LND",
+      "authentication": {
+        "macaroonPath": "/macaroons/lnd3"
+      },
+      "settings": {
+        "userPersona": "OPERATOR",
+        "themeMode": "NIGHT",
+        "themeColor": "INDIGO",
+        "channelBackupPath": "",
+        "logLevel": "ERROR",
+        "lnServerUrl": "https://127.0.0.1:${PORTS[lnd3_rest]}",
         "fiatConversion": false,
         "unannouncedChannels": false
       }
@@ -628,6 +650,15 @@ services:
       - ./lnd2/data:/root/.lnd
       - ./lnd2/lnd.conf:/root/.lnd/lnd.conf:ro
 
+  lnd3:
+    image: ${LND_IMAGE}
+    container_name: lnd3
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./lnd3/data:/root/.lnd
+      - ./lnd3/lnd.conf:/root/.lnd/lnd.conf:ro
+
   rtl:
     image: ${RTL_IMAGE}
     container_name: rtl
@@ -640,6 +671,7 @@ services:
       - ./rtl/database:/RTL/database
       - ./lnd1/data/data/chain/bitcoin/regtest:/macaroons/lnd1:ro
       - ./lnd2/data/data/chain/bitcoin/regtest:/macaroons/lnd2:ro
+      - ./lnd3/data/data/chain/bitcoin/regtest:/macaroons/lnd3:ro
 
   mostro:
     image: ${MOSTRO_IMAGE}
@@ -667,9 +699,9 @@ EOF
   fi
   ok "docker-compose.yml written"
 
-  docker compose -f "${BASE_DIR}/docker-compose.yml" up -d lnd1 lnd2
+  docker compose -f "${BASE_DIR}/docker-compose.yml" up -d lnd1 lnd2 lnd3
   sleep 3
-  ok "lnd1 and lnd2 running"
+  ok "lnd1, lnd2, and lnd3 running"
 }
 
 ###############################################################################
@@ -692,13 +724,13 @@ step_wallets_and_unlock() {
     write_lnd_conf "$node" "wallet-unlock-password-file=/root/.lnd/wallet-password.txt"
   done
 
-  docker compose -f "${BASE_DIR}/docker-compose.yml" restart lnd1 lnd2
+  docker compose -f "${BASE_DIR}/docker-compose.yml" restart lnd1 lnd2 lnd3
   sleep 5
 
   for node in "${NODES[@]}"; do
     wait_ready "$node" || fail "${node} not responding after restart"
   done
-  ok "Both nodes unlocked and ready"
+  ok "All nodes unlocked and ready"
 
   docker compose -f "${BASE_DIR}/docker-compose.yml" up -d rtl
   ok "RTL started on http://127.0.0.1:${RTL_PORT}"
@@ -766,13 +798,13 @@ step_mostro() {
 }
 
 ###############################################################################
-#  STEP 8 — Fund wallets + open channel + rebalance
-#  Send on-chain BTC from bitcoind's miner wallet to both LND nodes, open a
-#  channel from lnd1→lnd2, then push half the capacity to lnd2 so the channel
-#  is balanced ~50/50. This gives both sides liquidity for testing payments.
+#  STEP 8 — Fund wallets + open channels (triangle topology)
+#  Send on-chain BTC from bitcoind's miner wallet to all LND nodes, open a
+#  balanced channel lnd1↔lnd2, then open channels from lnd3→lnd1 and lnd3→lnd2.
+#  This creates a triangle topology for richer routing.
 ###############################################################################
 step_fund_and_channel() {
-  log "8/9" "Funding wallets and opening channel"
+  log "8/9" "Funding wallets and opening channels"
 
   if ! bcli listwallets | jq -e ".[] | select(.==\"${MINER_WALLET}\")" >/dev/null 2>&1; then
     if bcli listwalletdir | jq -e ".wallets[].name | select(.==\"${MINER_WALLET}\")" >/dev/null 2>&1; then
@@ -790,15 +822,16 @@ step_fund_and_channel() {
 
   mine_blocks 6
   sleep 3
-  ok "lnd1 received ${FUND_BTC[lnd1]} BTC, lnd2 received ${FUND_BTC[lnd2]} BTC"
+  ok "lnd1 received ${FUND_BTC[lnd1]} BTC, lnd2 received ${FUND_BTC[lnd2]} BTC, lnd3 received ${FUND_BTC[lnd3]} BTC"
 
+  # ── lnd1↔lnd2 balanced channel ──
   local pub2
   pub2="$(lncli lnd2 getinfo | jq -r '.identity_pubkey')"
   lncli lnd1 connect "${pub2}@127.0.0.1:${PORTS[lnd2_listen]}" >/dev/null 2>&1 || true
   sleep 2
 
   lncli lnd1 openchannel --node_key="${pub2}" --local_amt="${CHANNEL_SATS}" >/dev/null
-  ok "Channel opened (pending confirmation)"
+  ok "lnd1↔lnd2 channel opened (pending confirmation)"
 
   mine_blocks 6
   sleep 5
@@ -806,7 +839,22 @@ step_fund_and_channel() {
   local invoice
   invoice="$(lncli lnd2 addinvoice --amt="${REBALANCE_SATS}" --memo="rebalance" | jq -r '.payment_request')"
   lncli lnd1 payinvoice --force "${invoice}" >/dev/null
-  ok "Channel balanced ~2.5 BTC each side"
+  ok "lnd1↔lnd2 channel balanced ~2.5 BTC each side"
+
+  # ── lnd3 channels (2.5 BTC to lnd1, 2.5 BTC to lnd2) ──
+  local pub1
+  pub1="$(lncli lnd1 getinfo | jq -r '.identity_pubkey')"
+
+  lncli lnd3 connect "${pub1}@127.0.0.1:${PORTS[lnd1_listen]}" >/dev/null 2>&1 || true
+  lncli lnd3 connect "${pub2}@127.0.0.1:${PORTS[lnd2_listen]}" >/dev/null 2>&1 || true
+  sleep 2
+
+  lncli lnd3 openchannel --node_key="${pub1}" --local_amt="${LND3_CHANNEL_SATS}" >/dev/null
+  lncli lnd3 openchannel --node_key="${pub2}" --local_amt="${LND3_CHANNEL_SATS}" >/dev/null
+  ok "lnd3 channels opened (2.5 BTC to lnd1, 2.5 BTC to lnd2)"
+
+  mine_blocks 6
+  sleep 5
 }
 
 ###############################################################################
@@ -967,6 +1015,7 @@ show_summary() {
   echo "  Seeds saved at:"
   echo "    ${BASE_DIR}/lnd1/data/seed.txt"
   echo "    ${BASE_DIR}/lnd2/data/seed.txt"
+  echo "    ${BASE_DIR}/lnd3/data/seed.txt"
   echo
   echo "  RTL web UI:"
   if [[ -n "${RTL_DOMAIN}" ]]; then
@@ -1006,6 +1055,7 @@ show_summary() {
   echo "    mostro-logs  Shows last 100 lines + follows in real time"
   echo "    lncli1:  docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd1_rpc]} <cmd>"
   echo "    lncli2:  docker exec lnd2 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd2_rpc]} <cmd>"
+  echo "    lncli3:  docker exec lnd3 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd3_rpc]} <cmd>"
   echo "    logs:    cd ${BASE_DIR} && docker compose logs -f"
   echo
 }
@@ -1028,6 +1078,7 @@ write_summary_file() {
 SEEDS
   lnd1: ${BASE_DIR}/lnd1/data/seed.txt
   lnd2: ${BASE_DIR}/lnd2/data/seed.txt
+  lnd3: ${BASE_DIR}/lnd3/data/seed.txt
 
 RTL WEB UI
 EOF
@@ -1071,6 +1122,7 @@ USEFUL COMMANDS
   mostro-logs                     Last 100 lines + follow
   docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd1_rpc]} <cmd>
   docker exec lnd2 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd2_rpc]} <cmd>
+  docker exec lnd3 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd3_rpc]} <cmd>
   cd ${BASE_DIR} && docker compose logs -f
 EOF
 

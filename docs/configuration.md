@@ -20,8 +20,10 @@ nano .env
 | `LND_IMAGE` | No | `lightninglabs/lnd:v0.20.1-beta` | LND Docker image |
 | `FUND_LND1_BTC` | No | `8` | BTC to fund lnd1 |
 | `FUND_LND2_BTC` | No | `3` | BTC to fund lnd2 |
-| `CHANNEL_SATS` | No | `500000000` | Channel capacity in sats |
-| `REBALANCE_SATS` | No | `250000000` | Amount to push for balancing |
+| `FUND_LND3_BTC` | No | `6` | BTC to fund lnd3 |
+| `CHANNEL_SATS` | No | `500000000` | lnd1↔lnd2 channel capacity in sats |
+| `REBALANCE_SATS` | No | `250000000` | Amount to push for balancing lnd1↔lnd2 |
+| `LND3_CHANNEL_SATS` | No | `250000000` | lnd3 channel capacity to lnd1 and lnd2 |
 | `RTL_IMAGE` | No | `shahanafarooqui/rtl:v0.15.8` | RTL Docker image |
 | `RTL_PORT` | No | `3000` | RTL web UI port |
 | `RTL_PASSWORD` | No | *(WALLET_PASS)* | RTL login password |
@@ -52,6 +54,11 @@ nano .env
 │   └── data/
 │       ├── seed.txt
 │       └── wallet-password.txt
+├── lnd3/
+│   ├── lnd.conf
+│   └── data/
+│       ├── seed.txt
+│       └── wallet-password.txt
 ├── rtl/
 │   ├── RTL-Config.json    # generated
 │   └── database/
@@ -67,11 +74,11 @@ nano .env
 
 All services bind to `127.0.0.1` only (not accessible from the internet).
 
-| Service | lnd1 | lnd2 |
-|---------|------|------|
-| P2P | 9735 | 9736 |
-| gRPC | 10009 | 10010 |
-| REST | 8080 | 8081 |
+| Service | lnd1 | lnd2 | lnd3 |
+|---------|------|------|------|
+| P2P | 9735 | 9736 | 9737 |
+| gRPC | 10009 | 10010 | 10011 |
+| REST | 8080 | 8081 | 8082 |
 
 | Service | Port |
 |---------|------|

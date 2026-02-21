@@ -1,6 +1,6 @@
 # Mostro Regtest
 
-Automated setup for 2 LND regtest nodes, RTL web UI, and [Mostro](https://github.com/MostroP2P/mostro) P2P exchange — all on localhost.
+Automated setup for 3 LND regtest nodes (triangle topology), RTL web UI, and [Mostro](https://github.com/MostroP2P/mostro) P2P exchange — all on localhost.
 
 ## Quick start
 
@@ -27,7 +27,7 @@ The script will prompt for a wallet password (min 8 chars), or set `WALLET_PASS`
 | 5/9 | Writes LND + RTL configs, `docker-compose.yml`, starts LND |
 | 6/9 | Creates wallets, enables auto-unlock, starts RTL |
 | 7/9 | Sets up Mostro: loads/prompts/generates Nostr key, starts Mostro on lnd1 |
-| 8/9 | Funds wallets, opens 5 BTC channel, balances 2.5/2.5 |
+| 8/9 | Funds wallets, opens channels (triangle: lnd1↔lnd2 balanced + lnd3→lnd1, lnd3→lnd2) |
 | 9/9 | Domains + HTTPS via nginx (skipped if neither `RTL_DOMAIN` nor `LNURL_DOMAIN` is set) |
 
 ## Documentation
