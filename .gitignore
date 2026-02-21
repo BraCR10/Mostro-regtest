@@ -6,3 +6,4 @@ lnd2/lnd.conf
 rtl/
 mostro/
 docker-compose.yml
+satdress/

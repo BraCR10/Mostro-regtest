@@ -30,6 +30,7 @@ Steps:
   6. Creates wallets, enables auto-unlock, starts RTL and Nostr relay
   7. Loads/prompts/generates Nostr key, configures and starts Mostro on lnd1
   8. Funds wallets and opens a balanced channel
+  9. Lightning Address via satdress + nginx (only if LNURL_DOMAIN is set)
 
 Configuration:
   Copy .env.example to .env and set BITCOIND_RPC_USER and BITCOIND_RPC_PASS
@@ -95,6 +96,10 @@ declare -A FUND_BTC=(
   [lnd1]="${FUND_LND1_BTC}"
   [lnd2]="${FUND_LND2_BTC}"
 )
+
+LNURL_DOMAIN="${LNURL_DOMAIN:-}"
+LNURL_USERNAMES="${LNURL_USERNAMES:-admin}"
+SATDRESS_PORT="${SATDRESS_PORT:-17422}"
 
 WALLET_PASS="${WALLET_PASS:-}"
 MOSTRO_NSEC=""
@@ -324,6 +329,52 @@ port = 50051
 EOF
 }
 
+# Generate nginx config for LNURL reverse proxy. HTTPS terminates here and
+# proxies to satdress on 127.0.0.1:SATDRESS_PORT. Certbot manages the certs.
+write_nginx_config() {
+  sudo tee /etc/nginx/sites-available/lnurl >/dev/null <<EOF
+server {
+    listen 80;
+    server_name ${LNURL_DOMAIN};
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name ${LNURL_DOMAIN};
+
+    ssl_certificate /etc/letsencrypt/live/${LNURL_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${LNURL_DOMAIN}/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:${SATDRESS_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+}
+
+# Generate satdress .env file. satdress reads its config from environment
+# variables. The SECRET is randomly generated for HMAC signing.
+write_satdress_env() {
+  mkdir -p "${BASE_DIR}/satdress/data"
+  local secret
+  secret="$(openssl rand -hex 32)"
+  cat > "${BASE_DIR}/satdress/.env" <<EOF
+PORT=${SATDRESS_PORT}
+DOMAIN=${LNURL_DOMAIN}
+HOST=127.0.0.1
+SECRET=${secret}
+SITE_NAME=Mostro Regtest
+SITE_OWNER_NAME=${LNURL_USERNAMES%%,*}
+SITE_OWNER_URL=https://${LNURL_DOMAIN}
+EOF
+  chmod 600 "${BASE_DIR}/satdress/.env"
+}
+
 generate_nostr_keys() {
   echo "  Building rana (Nostr key generator)... this may take a few minutes on first run"
   local build_dir
@@ -409,7 +460,7 @@ create_wallet_rest() {
 #  only to fail midway wastes time and leaves partial state to clean up.
 ###############################################################################
 step_preflight() {
-  log "1/8" "Preflight checks"
+  log "1/9" "Preflight checks"
 
   if ! command -v docker &>/dev/null; then
     fail "docker is not installed (sudo apt install docker.io)"
@@ -436,7 +487,7 @@ step_preflight() {
 #  Both are lightweight and safe to auto-install.
 ###############################################################################
 step_deps() {
-  log "2/8" "Checking dependencies (jq, curl)"
+  log "2/9" "Checking dependencies (jq, curl)"
 
   local missing=()
   for cmd in jq curl; do
@@ -463,10 +514,10 @@ step_deps() {
 #  to delete them reliably.
 ###############################################################################
 step_clean() {
-  log "3/8" "Cleaning environment (bitcoind NOT touched)"
+  log "3/9" "Cleaning environment (bitcoind NOT touched)"
 
   docker compose -f "${BASE_DIR}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
-  docker rm -f "${NODES[@]}" rtl nostr-relay mostro 2>/dev/null || true
+  docker rm -f "${NODES[@]}" rtl nostr-relay mostro satdress 2>/dev/null || true
 
   for node in "${NODES[@]}"; do
     if [[ -d "${BASE_DIR}/${node}" ]]; then
@@ -475,7 +526,7 @@ step_clean() {
       rm -rf "${BASE_DIR:?}/${node}" 2>/dev/null || true
     fi
   done
-  rm -rf "${BASE_DIR}/rtl" "${BASE_DIR}/mostro" 2>/dev/null || true
+  rm -rf "${BASE_DIR}/rtl" "${BASE_DIR}/mostro" "${BASE_DIR}/satdress" 2>/dev/null || true
   rm -f "${BASE_DIR}/docker-compose.yml" 2>/dev/null || true
 
   for node in "${NODES[@]}"; do
@@ -491,7 +542,7 @@ step_clean() {
 #  script can run unattended.
 ###############################################################################
 step_password() {
-  log "4/8" "Wallet password for LND"
+  log "4/9" "Wallet password for LND"
 
   if [[ -n "${WALLET_PASS:-}" ]] && (( ${#WALLET_PASS} >= 8 )); then
     ok "Password loaded from .env"
@@ -526,7 +577,7 @@ step_password() {
 #  macaroon files that don't exist until wallets are created.
 ###############################################################################
 step_configs_and_start() {
-  log "5/8" "Writing configs and starting LND containers"
+  log "5/9" "Writing configs and starting LND containers"
 
   for node in "${NODES[@]}"; do
     write_lnd_conf "$node"
@@ -589,6 +640,21 @@ services:
     volumes:
       - ./mostro:/config
 EOF
+
+  if [[ -n "${LNURL_DOMAIN}" ]]; then
+    cat >> "${BASE_DIR}/docker-compose.yml" <<EOF
+
+  satdress:
+    image: jaonoctus/satdress
+    container_name: satdress
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - ./satdress/.env
+    volumes:
+      - ./satdress/data:/data
+EOF
+  fi
   ok "docker-compose.yml written"
 
   docker compose -f "${BASE_DIR}/docker-compose.yml" up -d lnd1 lnd2
@@ -604,7 +670,7 @@ EOF
 #  macaroons are available and RTL + relay can start.
 ###############################################################################
 step_wallets_and_unlock() {
-  log "6/8" "Creating wallets, enabling auto-unlock, starting RTL"
+  log "6/9" "Creating wallets, enabling auto-unlock, starting RTL"
 
   for node in "${NODES[@]}"; do
     create_wallet_rest "$node"
@@ -636,7 +702,7 @@ step_wallets_and_unlock() {
 #  we copy lnd1's TLS cert and admin macaroon so Mostro can talk to it.
 ###############################################################################
 step_mostro() {
-  log "7/8" "Setting up Mostro (P2P exchange on lnd1)"
+  log "7/9" "Setting up Mostro (P2P exchange on lnd1)"
 
   mkdir -p "${BASE_DIR}/mostro"
 
@@ -697,7 +763,7 @@ step_mostro() {
 #  is balanced ~50/50. This gives both sides liquidity for testing payments.
 ###############################################################################
 step_fund_and_channel() {
-  log "8/8" "Funding wallets and opening channel"
+  log "8/9" "Funding wallets and opening channel"
 
   if ! bcli listwallets | jq -e ".[] | select(.==\"${MINER_WALLET}\")" >/dev/null 2>&1; then
     if bcli listwalletdir | jq -e ".wallets[].name | select(.==\"${MINER_WALLET}\")" >/dev/null 2>&1; then
@@ -732,6 +798,117 @@ step_fund_and_channel() {
   invoice="$(lncli lnd2 addinvoice --amt="${REBALANCE_SATS}" --memo="rebalance" | jq -r '.payment_request')"
   lncli lnd1 payinvoice --force "${invoice}" >/dev/null
   ok "Channel balanced ~2.5 BTC each side"
+}
+
+###############################################################################
+#  STEP 9 — Lightning Address (conditional)
+#  Sets up satdress + nginx + certbot so users can receive payments at
+#  username@domain.  Skipped entirely if LNURL_DOMAIN is not set in .env.
+###############################################################################
+step_lnurl() {
+  log "9/9" "Lightning Address (satdress + nginx)"
+
+  if [[ -z "${LNURL_DOMAIN}" ]]; then
+    ok "Skipped — LNURL_DOMAIN not set in .env"
+    return
+  fi
+
+  echo "  Domain: ${LNURL_DOMAIN}"
+  echo "  Usernames: ${LNURL_USERNAMES}"
+
+  # ── Install nginx + certbot if not present ──
+  local to_install=()
+  command -v nginx &>/dev/null || to_install+=(nginx)
+  command -v certbot &>/dev/null || to_install+=(certbot python3-certbot-nginx)
+
+  if (( ${#to_install[@]} > 0 )); then
+    echo "  Installing: ${to_install[*]}"
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq "${to_install[@]}" >/dev/null
+    ok "${to_install[*]} installed"
+  else
+    ok "nginx and certbot already installed"
+  fi
+
+  # ── Open ports 80/443 in ufw ──
+  if command -v ufw &>/dev/null; then
+    sudo ufw allow 80/tcp >/dev/null 2>&1 || true
+    sudo ufw allow 443/tcp >/dev/null 2>&1 || true
+    ok "Firewall: ports 80 and 443 open"
+  fi
+
+  # ── Obtain SSL certificate ──
+  if [[ ! -d "/etc/letsencrypt/live/${LNURL_DOMAIN}" ]]; then
+    echo "  Obtaining SSL certificate for ${LNURL_DOMAIN}..."
+    sudo certbot certonly --nginx -d "${LNURL_DOMAIN}" \
+      --non-interactive --agree-tos -m "admin@${LNURL_DOMAIN}"
+    ok "SSL certificate obtained"
+  else
+    ok "SSL certificate already exists"
+  fi
+
+  # ── Write nginx config ──
+  write_nginx_config
+  sudo ln -sf /etc/nginx/sites-available/lnurl /etc/nginx/sites-enabled/lnurl
+  sudo nginx -t >/dev/null 2>&1 || fail "nginx config invalid"
+  sudo systemctl reload nginx
+  ok "nginx configured and reloaded"
+
+  # ── Write satdress config and start container ──
+  write_satdress_env
+  ok "satdress .env written"
+
+  docker compose -f "${BASE_DIR}/docker-compose.yml" up -d satdress
+  sleep 3
+
+  # Wait for satdress to respond
+  local i=0
+  while (( i < 30 )); do
+    if curl -s "http://127.0.0.1:${SATDRESS_PORT}" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+    (( i++ ))
+  done
+  if (( i >= 30 )); then
+    fail "satdress not responding on 127.0.0.1:${SATDRESS_PORT}"
+  fi
+  ok "satdress running on 127.0.0.1:${SATDRESS_PORT}"
+
+  # ── Register Lightning Addresses ──
+  local mac_hex
+  mac_hex="$(docker exec lnd1 xxd -p -c 9999 /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon 2>/dev/null)" \
+    || fail "Could not read admin macaroon from lnd1"
+
+  IFS=',' read -ra lnurl_users <<< "${LNURL_USERNAMES}"
+  for uname in "${lnurl_users[@]}"; do
+    uname="$(echo "$uname" | xargs)"  # trim whitespace
+    [[ -z "$uname" ]] && continue
+
+    local register_payload
+    register_payload="$(cat <<EOJSON
+{
+  "name": "${uname}",
+  "kind": "lnd",
+  "host": "127.0.0.1:${PORTS[lnd1_rest]}",
+  "key": "${mac_hex}",
+  "pak": ""
+}
+EOJSON
+)"
+
+    local reg_resp
+    reg_resp="$(curl -s -X POST "http://127.0.0.1:${SATDRESS_PORT}/api/easy/" \
+      -H "Content-Type: application/json" \
+      -d "${register_payload}" 2>/dev/null)" || true
+
+    if echo "$reg_resp" | jq -e '.ok' >/dev/null 2>&1; then
+      ok "Lightning Address registered: ${uname}@${LNURL_DOMAIN}"
+    else
+      echo "  Warning: ${uname} registration response: ${reg_resp}"
+      echo "  You can register manually at http://127.0.0.1:${SATDRESS_PORT}"
+    fi
+  done
 }
 
 # ── Shell aliases ─────────────────────────────────────────────────────────────
@@ -779,6 +956,18 @@ show_summary() {
   echo "    Private key: ${BASE_DIR}/mostro/nostr-private.txt"
   echo
 
+  if [[ -n "${LNURL_DOMAIN}" ]]; then
+    echo "  Lightning Addresses:"
+    IFS=',' read -ra summary_users <<< "${LNURL_USERNAMES}"
+    for uname in "${summary_users[@]}"; do
+      uname="$(echo "$uname" | xargs)"
+      [[ -z "$uname" ]] && continue
+      echo "    ${uname}@${LNURL_DOMAIN}"
+      echo "      https://${LNURL_DOMAIN}/.well-known/lnurlp/${uname}"
+    done
+    echo
+  fi
+
   echo "  Channel balances:"
   for node in "${NODES[@]}"; do
     echo "  ── ${node} ──"
@@ -805,6 +994,7 @@ main() {
   step_wallets_and_unlock
   step_mostro
   step_fund_and_channel
+  step_lnurl
   install_shell_commands
   show_summary
 }

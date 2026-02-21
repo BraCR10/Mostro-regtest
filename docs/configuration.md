@@ -30,6 +30,9 @@ nano .env
 | `MOSTRO_RELAY_PORT` | No | `7000` | Nostr relay port |
 | `MOSTRO_NSEC_PRIVKEY` | No | *(prompted)* | Nostr private key for Mostro |
 | `MOSTRO_RELAYS` | No | `wss://nos.lol,wss://relay.mostro.network` | Extra relays (comma-separated, added alongside local) |
+| `LNURL_DOMAIN` | No | *(disabled)* | Domain for Lightning Address (enables step 9) |
+| `LNURL_USERNAMES` | No | `admin` | Comma-separated usernames (`admin,user2`) |
+| `SATDRESS_PORT` | No | `17422` | satdress HTTP port |
 
 ## Directory structure
 
@@ -52,11 +55,14 @@ nano .env
 ├── rtl/
 │   ├── RTL-Config.json    # generated
 │   └── database/
-└── mostro/
-    ├── settings.toml       # generated
-    ├── nostr-private.txt   # nsec key (chmod 600)
-    ├── relay-config.toml   # Nostr relay config
-    └── relay-data/
+├── mostro/
+│   ├── settings.toml       # generated
+│   ├── nostr-private.txt   # nsec key (chmod 600)
+│   ├── relay-config.toml   # Nostr relay config
+│   └── relay-data/
+└── satdress/               # only if LNURL_DOMAIN is set
+    ├── .env                # generated (chmod 600)
+    └── data/
 ```
 
 ## Ports
@@ -77,3 +83,4 @@ All services bind to `127.0.0.1` only (not accessible from the internet).
 | bitcoind RPC | 18443 |
 | ZMQ block | 28332 |
 | ZMQ tx | 28333 |
+| satdress | 17422 |

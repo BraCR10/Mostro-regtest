@@ -20,14 +20,15 @@ The script will prompt for a wallet password (min 8 chars), or set `WALLET_PASS`
 
 | Step | Description |
 |------|-------------|
-| 1/8 | Verifies prerequisites (docker, bitcoind, bitcoin-cli) |
-| 2/8 | Installs `jq` and `curl` (skips if already installed) |
-| 3/8 | Cleans previous environment (bitcoind is **not touched**) |
-| 4/8 | Asks for wallet password (or loads from `.env`) |
-| 5/8 | Writes LND + RTL + relay configs, `docker-compose.yml`, starts LND |
-| 6/8 | Creates wallets, enables auto-unlock, starts RTL and Nostr relay |
-| 7/8 | Sets up Mostro: loads/prompts/generates Nostr key, starts Mostro on lnd1 |
-| 8/8 | Funds wallets, opens 5 BTC channel, balances 2.5/2.5 |
+| 1/9 | Verifies prerequisites (docker, bitcoind, bitcoin-cli) |
+| 2/9 | Installs `jq` and `curl` (skips if already installed) |
+| 3/9 | Cleans previous environment (bitcoind is **not touched**) |
+| 4/9 | Asks for wallet password (or loads from `.env`) |
+| 5/9 | Writes LND + RTL + relay configs, `docker-compose.yml`, starts LND |
+| 6/9 | Creates wallets, enables auto-unlock, starts RTL and Nostr relay |
+| 7/9 | Sets up Mostro: loads/prompts/generates Nostr key, starts Mostro on lnd1 |
+| 8/9 | Funds wallets, opens 5 BTC channel, balances 2.5/2.5 |
+| 9/9 | Lightning Address via satdress + nginx (skipped if `LNURL_DOMAIN` not set) |
 
 ## Documentation
 

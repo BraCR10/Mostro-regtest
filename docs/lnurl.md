@@ -74,56 +74,73 @@ TTL: Automatic
 
 ### 2. HTTPS (SSL certificate)
 
-LNURL requires HTTPS. The simplest option is [Caddy](https://caddyserver.com/) as a reverse proxy — it obtains Let's Encrypt certificates automatically:
+LNURL requires HTTPS. This setup uses **nginx + certbot** (Let's Encrypt) on the host. The script installs both automatically in step 9.
 
-```
-yourdomain.com {
-    reverse_proxy 127.0.0.1:8080
-}
-```
+### 3. An LNURL server (satdress)
 
-Alternatively you can use nginx + certbot.
+[satdress](https://github.com/nbd-wtf/satdress) is a lightweight Lightning Address server. It runs as a Docker container, receives HTTP requests at `/.well-known/lnurlp/<username>`, and generates invoices from your LND node.
 
-### 3. An LNURL server
+## How it's set up (step 9)
 
-The server receives HTTP requests at `/.well-known/lnurlp/<username>` and generates invoices from your LND node. The [lnurl-rs](https://github.com/benthecarman/lnurl-rs) library implements the full protocol in Rust.
+Step 9 of `setup.sh` is **conditional** — it only runs if `LNURL_DOMAIN` is set in `.env`:
 
-## Endpoint response
-
-The endpoint `GET https://yourdomain.com/.well-known/lnurlp/username` must return:
-
-```json
-{
-  "status": "OK",
-  "tag": "payRequest",
-  "callback": "https://yourdomain.com/lnurl/pay/username",
-  "minSendable": 1000,
-  "maxSendable": 100000000,
-  "metadata": "[[\"text/plain\",\"Payment to username\"]]",
-  "commentAllowed": 140
-}
+```bash
+# .env
+LNURL_DOMAIN=yourdomain.com
+LNURL_USERNAME=admin          # optional, defaults to "admin"
 ```
 
-- `minSendable` / `maxSendable` in **millisatoshis** (1000 msat = 1 sat)
-- `callback` is the URL the wallet calls with `?amount=<msat>` to get the BOLT11 invoice
-- `metadata` is a JSON-string with at least `text/plain`
+What step 9 does:
 
-## Flow summary
+1. Installs nginx + certbot (skips if already installed)
+2. Opens ports 80/443 in ufw
+3. Obtains an SSL certificate via `certbot certonly --nginx`
+4. Writes an nginx reverse proxy config (HTTPS → satdress on `127.0.0.1:17422`)
+5. Writes satdress `.env` and starts the satdress Docker container
+6. Auto-registers `admin@yourdomain.com` via the satdress API, pointing to lnd1
+
+## Architecture
 
 ```
-[Buy domain] --> [DNS: A record pointing to your VPS]
-                            |
-                            v
-                  [Reverse proxy with HTTPS]
-                     (Caddy or nginx)
-                            |
-                            v
-                  [LNURL server on your VPS]
-                   /.well-known/lnurlp/*
-                            |
-                            v
-                     [Your LND node]
-                  (generates BOLT11 invoices)
+Internet (payer's wallet)
+        |
+        v
+  nginx (ports 80/443, HTTPS)
+        |
+        v
+  satdress (127.0.0.1:17422)
+   /.well-known/lnurlp/*
+        |
+        v
+  lnd1 (127.0.0.1:8080 REST)
+   generates BOLT11 invoices
 ```
 
-The heavy part (LND node, channels, liquidity) is already in place with this setup. The LNURL server is just the HTTP bridge that converts web requests into invoices from your node.
+nginx runs on the host (not Docker) because it needs ports 80/443 and certbot integration. satdress runs in Docker with host networking, following the same pattern as lnd1/lnd2.
+
+## Verification
+
+```bash
+# Check satdress is running
+docker ps | grep satdress
+
+# Check nginx config
+sudo nginx -t
+
+# Test the Lightning Address endpoint
+curl -s https://yourdomain.com/.well-known/lnurlp/admin
+
+# Expected response (LNURL-pay JSON):
+# {"callback":"...","maxSendable":...,"minSendable":...,"metadata":"...","tag":"payRequest"}
+```
+
+## Manual registration
+
+If auto-registration fails, you can register manually at `http://127.0.0.1:17422` in a browser (via SSH tunnel) or via the API:
+
+```bash
+MAC_HEX=$(docker exec lnd1 xxd -p -c 9999 /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon)
+curl -X POST http://127.0.0.1:17422/api/easy/ \
+  -H "Content-Type: application/json" \
+  -d "{\"name\":\"admin\",\"kind\":\"lnd\",\"host\":\"127.0.0.1:8080\",\"key\":\"${MAC_HEX}\",\"pak\":\"\"}"
+```
