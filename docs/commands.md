@@ -45,7 +45,7 @@ cd ~/BTC/lnd && docker compose logs -f
 # Specific service
 cd ~/BTC/lnd && docker compose logs -f rtl
 cd ~/BTC/lnd && docker compose logs -f lnd1
-cd ~/BTC/lnd && docker compose logs -f nostr-relay
+cd ~/BTC/lnd && docker compose logs -f mostro
 ```
 
 ## Mining blocks
@@ -61,7 +61,8 @@ bitcoin-cli -regtest -rpcwallet=miner generatetoaddress 1 $(bitcoin-cli -regtest
 Confirm no services are exposed to the internet:
 
 ```bash
-# Should only show port 22 on 0.0.0.0 / *
+# Without domains: should only show port 22
+# With RTL_DOMAIN or LNURL_DOMAIN: also ports 80, 443 (nginx)
 ss -tlnp | grep -v 127.0.0
 ```
 

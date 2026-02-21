@@ -82,12 +82,12 @@ LNURL requires HTTPS. This setup uses **nginx + certbot** (Let's Encrypt) on the
 
 ## How it's set up (step 9)
 
-Step 9 of `setup.sh` is **conditional** — it only runs if `LNURL_DOMAIN` is set in `.env`:
+Step 9 of `setup.sh` is **conditional** — it runs if `LNURL_DOMAIN` or `RTL_DOMAIN` is set in `.env`. The LNURL/satdress part only runs if `LNURL_DOMAIN` is set:
 
 ```bash
 # .env
 LNURL_DOMAIN=yourdomain.com
-LNURL_USERNAME=admin          # optional, defaults to "admin"
+LNURL_USERNAMES=admin         # optional, defaults to "admin"
 ```
 
 What step 9 does:
@@ -140,7 +140,7 @@ If auto-registration fails, you can register manually at `http://127.0.0.1:17422
 
 ```bash
 MAC_HEX=$(docker exec lnd1 xxd -p -c 9999 /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon)
-curl -X POST http://127.0.0.1:17422/api/easy/ \
-  -H "Content-Type: application/json" \
-  -d "{\"name\":\"admin\",\"kind\":\"lnd\",\"host\":\"127.0.0.1:8080\",\"key\":\"${MAC_HEX}\",\"pak\":\"\"}"
+curl -X POST http://127.0.0.1:17422/grab \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "name=admin&kind=lnd&host=https://127.0.0.1:8080&key=${MAC_HEX}"
 ```

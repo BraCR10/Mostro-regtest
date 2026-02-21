@@ -28,7 +28,7 @@ The script will prompt for a wallet password (min 8 chars), or set `WALLET_PASS`
 | 6/9 | Creates wallets, enables auto-unlock, starts RTL |
 | 7/9 | Sets up Mostro: loads/prompts/generates Nostr key, starts Mostro on lnd1 |
 | 8/9 | Funds wallets, opens 5 BTC channel, balances 2.5/2.5 |
-| 9/9 | Lightning Address via satdress + nginx (skipped if `LNURL_DOMAIN` not set) |
+| 9/9 | Domains + HTTPS via nginx (skipped if neither `RTL_DOMAIN` nor `LNURL_DOMAIN` is set) |
 
 ## Documentation
 

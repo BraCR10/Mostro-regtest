@@ -30,7 +30,7 @@ Steps:
   6. Creates wallets, enables auto-unlock, starts RTL
   7. Loads/prompts/generates Nostr key, configures and starts Mostro on lnd1
   8. Funds wallets and opens a balanced channel
-  9. Lightning Address via satdress + nginx (only if LNURL_DOMAIN is set)
+  9. Domains + HTTPS via nginx (only if RTL_DOMAIN or LNURL_DOMAIN is set)
 
 Configuration:
   Copy .env.example to .env and set BITCOIND_RPC_USER and BITCOIND_RPC_PASS
@@ -78,6 +78,7 @@ REBALANCE_SATS="${REBALANCE_SATS:-250000000}"
 
 RTL_IMAGE="${RTL_IMAGE:-shahanafarooqui/rtl:v0.15.8}"
 RTL_PORT="${RTL_PORT:-3000}"
+RTL_DOMAIN="${RTL_DOMAIN:-}"
 
 MOSTRO_IMAGE="${MOSTRO_IMAGE:-mostrop2p/mostro:latest}"
 MOSTRO_RELAYS="${MOSTRO_RELAYS:-wss://nos.lol,wss://relay.mostro.network}"
@@ -335,6 +336,37 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+}
+
+# Generate nginx config for RTL reverse proxy. HTTPS terminates here and
+# proxies to RTL on 127.0.0.1:RTL_PORT. Includes WebSocket headers since
+# RTL uses WebSockets for real-time updates.
+write_rtl_nginx_config() {
+  sudo tee /etc/nginx/sites-available/rtl >/dev/null <<EOF
+server {
+    listen 80;
+    server_name ${RTL_DOMAIN};
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name ${RTL_DOMAIN};
+
+    ssl_certificate /etc/letsencrypt/live/${RTL_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${RTL_DOMAIN}/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:${RTL_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 }
 EOF
@@ -772,20 +804,21 @@ step_fund_and_channel() {
 }
 
 ###############################################################################
-#  STEP 9 — Lightning Address (conditional)
-#  Sets up satdress + nginx + certbot so users can receive payments at
-#  username@domain.  Skipped entirely if LNURL_DOMAIN is not set in .env.
+#  STEP 9 — Domains + HTTPS (conditional)
+#  Sets up nginx + certbot for any configured domains. RTL_DOMAIN gets a
+#  reverse proxy to RTL; LNURL_DOMAIN gets satdress for Lightning Address.
+#  Skipped entirely if neither domain is set in .env.
 ###############################################################################
-step_lnurl() {
-  log "9/9" "Lightning Address (satdress + nginx)"
+step_domains() {
+  log "9/9" "Domains + HTTPS (nginx + certbot)"
 
-  if [[ -z "${LNURL_DOMAIN}" ]]; then
-    ok "Skipped — LNURL_DOMAIN not set in .env"
+  if [[ -z "${RTL_DOMAIN}" && -z "${LNURL_DOMAIN}" ]]; then
+    ok "Skipped — neither RTL_DOMAIN nor LNURL_DOMAIN set in .env"
     return
   fi
 
-  echo "  Domain: ${LNURL_DOMAIN}"
-  echo "  Usernames: ${LNURL_USERNAMES}"
+  [[ -n "${RTL_DOMAIN}" ]] && echo "  RTL domain: ${RTL_DOMAIN}"
+  [[ -n "${LNURL_DOMAIN}" ]] && echo "  LNURL domain: ${LNURL_DOMAIN}"
 
   # ── Install nginx + certbot if not present ──
   local to_install=()
@@ -808,67 +841,87 @@ step_lnurl() {
     ok "Firewall: ports 80 and 443 open"
   fi
 
-  # ── Obtain SSL certificate ──
-  if [[ ! -d "/etc/letsencrypt/live/${LNURL_DOMAIN}" ]]; then
-    echo "  Obtaining SSL certificate for ${LNURL_DOMAIN}..."
-    sudo certbot certonly --nginx -d "${LNURL_DOMAIN}" \
-      --non-interactive --agree-tos -m "admin@${LNURL_DOMAIN}"
-    ok "SSL certificate obtained"
-  else
-    ok "SSL certificate already exists"
+  # ── RTL domain ──
+  if [[ -n "${RTL_DOMAIN}" ]]; then
+    if [[ ! -d "/etc/letsencrypt/live/${RTL_DOMAIN}" ]]; then
+      echo "  Obtaining SSL certificate for ${RTL_DOMAIN}..."
+      sudo certbot certonly --nginx -d "${RTL_DOMAIN}" \
+        --non-interactive --agree-tos -m "admin@${RTL_DOMAIN}"
+      ok "SSL certificate obtained for ${RTL_DOMAIN}"
+    else
+      ok "SSL certificate already exists for ${RTL_DOMAIN}"
+    fi
+
+    write_rtl_nginx_config
+    sudo ln -sf /etc/nginx/sites-available/rtl /etc/nginx/sites-enabled/rtl
+    ok "nginx config written for ${RTL_DOMAIN}"
   fi
 
-  # ── Write nginx config ──
-  write_nginx_config
-  sudo ln -sf /etc/nginx/sites-available/lnurl /etc/nginx/sites-enabled/lnurl
+  # ── LNURL domain ──
+  if [[ -n "${LNURL_DOMAIN}" ]]; then
+    if [[ ! -d "/etc/letsencrypt/live/${LNURL_DOMAIN}" ]]; then
+      echo "  Obtaining SSL certificate for ${LNURL_DOMAIN}..."
+      sudo certbot certonly --nginx -d "${LNURL_DOMAIN}" \
+        --non-interactive --agree-tos -m "admin@${LNURL_DOMAIN}"
+      ok "SSL certificate obtained for ${LNURL_DOMAIN}"
+    else
+      ok "SSL certificate already exists for ${LNURL_DOMAIN}"
+    fi
+
+    write_nginx_config
+    sudo ln -sf /etc/nginx/sites-available/lnurl /etc/nginx/sites-enabled/lnurl
+    ok "nginx config written for ${LNURL_DOMAIN}"
+
+    # ── Write satdress config and start container ──
+    write_satdress_env
+    ok "satdress .env written"
+
+    docker compose -f "${BASE_DIR}/docker-compose.yml" up -d satdress
+    sleep 3
+
+    # Wait for satdress to respond
+    local i=0
+    while (( i < 30 )); do
+      if curl -s "http://127.0.0.1:${SATDRESS_PORT}" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+      (( i++ ))
+    done
+    if (( i >= 30 )); then
+      fail "satdress not responding on 127.0.0.1:${SATDRESS_PORT}"
+    fi
+    ok "satdress running on 127.0.0.1:${SATDRESS_PORT}"
+
+    # ── Register Lightning Addresses ──
+    local mac_hex
+    mac_hex="$(docker exec lnd1 xxd -p -c 9999 /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon 2>/dev/null)" \
+      || fail "Could not read admin macaroon from lnd1"
+
+    IFS=',' read -ra lnurl_users <<< "${LNURL_USERNAMES}"
+    for uname in "${lnurl_users[@]}"; do
+      uname="$(echo "$uname" | xargs)"  # trim whitespace
+      [[ -z "$uname" ]] && continue
+
+      local reg_resp
+      reg_resp="$(curl -s -X POST "http://127.0.0.1:${SATDRESS_PORT}/grab" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "name=${uname}&kind=lnd&host=https://127.0.0.1:${PORTS[lnd1_rest]}&key=${mac_hex}" \
+        2>/dev/null)" || true
+
+      if echo "$reg_resp" | grep -q '"name":"'"${uname}"'"'; then
+        ok "Lightning Address registered: ${uname}@${LNURL_DOMAIN}"
+      else
+        echo "  Warning: ${uname} registration may have failed"
+        echo "  You can register manually at http://127.0.0.1:${SATDRESS_PORT}"
+      fi
+    done
+  fi
+
+  # ── Final nginx reload ──
   sudo nginx -t >/dev/null 2>&1 || fail "nginx config invalid"
   sudo systemctl reload nginx
-  ok "nginx configured and reloaded"
-
-  # ── Write satdress config and start container ──
-  write_satdress_env
-  ok "satdress .env written"
-
-  docker compose -f "${BASE_DIR}/docker-compose.yml" up -d satdress
-  sleep 3
-
-  # Wait for satdress to respond
-  local i=0
-  while (( i < 30 )); do
-    if curl -s "http://127.0.0.1:${SATDRESS_PORT}" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-    (( i++ ))
-  done
-  if (( i >= 30 )); then
-    fail "satdress not responding on 127.0.0.1:${SATDRESS_PORT}"
-  fi
-  ok "satdress running on 127.0.0.1:${SATDRESS_PORT}"
-
-  # ── Register Lightning Addresses ──
-  local mac_hex
-  mac_hex="$(docker exec lnd1 xxd -p -c 9999 /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon 2>/dev/null)" \
-    || fail "Could not read admin macaroon from lnd1"
-
-  IFS=',' read -ra lnurl_users <<< "${LNURL_USERNAMES}"
-  for uname in "${lnurl_users[@]}"; do
-    uname="$(echo "$uname" | xargs)"  # trim whitespace
-    [[ -z "$uname" ]] && continue
-
-    local reg_resp
-    reg_resp="$(curl -s -X POST "http://127.0.0.1:${SATDRESS_PORT}/grab" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "name=${uname}&kind=lnd&host=https://127.0.0.1:${PORTS[lnd1_rest]}&key=${mac_hex}" \
-      2>/dev/null)" || true
-
-    if echo "$reg_resp" | grep -q '"name":"'"${uname}"'"'; then
-      ok "Lightning Address registered: ${uname}@${LNURL_DOMAIN}"
-    else
-      echo "  Warning: ${uname} registration may have failed"
-      echo "  You can register manually at http://127.0.0.1:${SATDRESS_PORT}"
-    fi
-  done
+  ok "nginx reloaded"
 }
 
 # ── Shell aliases ─────────────────────────────────────────────────────────────
@@ -906,8 +959,12 @@ show_summary() {
   echo "    ${BASE_DIR}/lnd2/data/seed.txt"
   echo
   echo "  RTL web UI:"
-  echo "    http://127.0.0.1:${RTL_PORT}"
-  echo "    SSH tunnel: ssh -L ${RTL_PORT}:127.0.0.1:${RTL_PORT} user@your-vps"
+  if [[ -n "${RTL_DOMAIN}" ]]; then
+    echo "    https://${RTL_DOMAIN}"
+  else
+    echo "    http://127.0.0.1:${RTL_PORT}"
+    echo "    SSH tunnel: ssh -L ${RTL_PORT}:127.0.0.1:${RTL_PORT} user@your-vps"
+  fi
   echo
   echo "  Mostro (P2P exchange on lnd1):"
   echo "    Relays: ${MOSTRO_RELAYS}"
@@ -954,7 +1011,7 @@ main() {
   step_wallets_and_unlock
   step_mostro
   step_fund_and_channel
-  step_lnurl
+  step_domains
   install_shell_commands
   show_summary
 }

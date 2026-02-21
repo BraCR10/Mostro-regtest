@@ -45,6 +45,14 @@ sudo ufw allow 3000/tcp
 cd ~/BTC/lnd && docker compose restart rtl
 ```
 
-### VPS — Custom domain with reverse proxy
+### VPS — Custom domain with HTTPS (recommended for public access)
 
-For production-like access with HTTPS and a domain name, you can put a reverse proxy (e.g. nginx, caddy, traefik) in front of RTL. The proxy handles TLS and public access while RTL stays on `127.0.0.1`.
+Set `RTL_DOMAIN` in `.env` and the setup script handles everything automatically — certbot obtains a TLS certificate and nginx is configured as a reverse proxy with WebSocket support:
+
+```bash
+RTL_DOMAIN=btcpanel.website
+```
+
+After setup, RTL is available at `https://btcpanel.website`. RTL stays bound to `127.0.0.1` — nginx is the only service listening on public ports.
+
+Requires a DNS A record pointing `btcpanel.website` to your server's IP before running the script.

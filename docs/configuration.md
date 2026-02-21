@@ -25,10 +25,11 @@ nano .env
 | `RTL_IMAGE` | No | `shahanafarooqui/rtl:v0.15.8` | RTL Docker image |
 | `RTL_PORT` | No | `3000` | RTL web UI port |
 | `RTL_PASSWORD` | No | *(WALLET_PASS)* | RTL login password |
+| `RTL_DOMAIN` | No | *(disabled)* | Domain for HTTPS access to RTL (enables nginx reverse proxy) |
 | `MOSTRO_IMAGE` | No | `mostrop2p/mostro:latest` | Mostro Docker image |
 | `MOSTRO_NSEC_PRIVKEY` | No | *(prompted)* | Nostr private key for Mostro |
 | `MOSTRO_RELAYS` | No | `wss://nos.lol,wss://relay.mostro.network` | Nostr relays (comma-separated) |
-| `LNURL_DOMAIN` | No | *(disabled)* | Domain for Lightning Address (enables step 9) |
+| `LNURL_DOMAIN` | No | *(disabled)* | Domain for Lightning Address (enables nginx + satdress + certbot) |
 | `LNURL_USERNAMES` | No | `admin` | Comma-separated usernames (`admin,user2`) |
 | `SATDRESS_PORT` | No | `17422` | satdress HTTP port |
 
