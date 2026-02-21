@@ -6,7 +6,7 @@ RTL is a web UI for managing Lightning nodes. After setup completes, it's availa
 http://127.0.0.1:3000
 ```
 
-Both LND nodes are available in the UI via a dropdown selector. The RTL password defaults to your `WALLET_PASS`. Set `RTL_PASSWORD` in `.env` to use a different one.
+All three LND nodes are available in the UI via a dropdown selector. The RTL password defaults to your `WALLET_PASS`. Set `RTL_PASSWORD` in `.env` to use a different one.
 
 ## Accessing RTL
 

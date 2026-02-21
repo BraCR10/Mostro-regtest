@@ -10,6 +10,9 @@ docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:10009 getinfo
 
 # lnd2
 docker exec lnd2 lncli --network=regtest --rpcserver=127.0.0.1:10010 getinfo
+
+# lnd3
+docker exec lnd3 lncli --network=regtest --rpcserver=127.0.0.1:10011 getinfo
 ```
 
 Common commands:
@@ -45,6 +48,7 @@ cd ~/BTC/lnd && docker compose logs -f
 # Specific service
 cd ~/BTC/lnd && docker compose logs -f rtl
 cd ~/BTC/lnd && docker compose logs -f lnd1
+cd ~/BTC/lnd && docker compose logs -f lnd3
 cd ~/BTC/lnd && docker compose logs -f mostro
 ```
 

@@ -121,7 +121,7 @@ Internet (payer's wallet)
    generates BOLT11 invoices
 ```
 
-nginx runs on the host (not Docker) because it needs ports 80/443 and certbot integration. satdress runs in Docker with host networking, following the same pattern as lnd1/lnd2.
+nginx runs on the host (not Docker) because it needs ports 80/443 and certbot integration. satdress runs in Docker with host networking, following the same pattern as lnd1/lnd2/lnd3.
 
 ## Verification
 

@@ -27,7 +27,7 @@ The script will prompt for a wallet password (min 8 chars), or set `WALLET_PASS`
 | 5/9 | Writes LND + RTL configs, `docker-compose.yml`, starts LND |
 | 6/9 | Creates wallets, enables auto-unlock, starts RTL |
 | 7/9 | Sets up Mostro: loads/prompts/generates Nostr key, starts Mostro on lnd1 |
-| 8/9 | Funds wallets, opens channels (triangle: lnd1↔lnd2 balanced + lnd3→lnd1, lnd3→lnd2) |
+| 8/9 | Funds wallets, opens and balances channels (triangle: lnd1↔lnd2, lnd3↔lnd1, lnd3↔lnd2) |
 | 9/9 | Domains + HTTPS via nginx (skipped if neither `RTL_DOMAIN` nor `LNURL_DOMAIN` is set) |
 
 ## Documentation
@@ -43,8 +43,9 @@ The script will prompt for a wallet password (min 8 chars), or set `WALLET_PASS`
 ## Useful commands
 
 ```bash
-# lncli
+# lncli (each node has its own RPC port: 10009, 10010, 10011)
 docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:10009 getinfo
+docker exec lnd3 lncli --network=regtest --rpcserver=127.0.0.1:10011 listchannels
 
 # Logs
 cd ~/BTC/lnd && docker compose logs -f mostro
