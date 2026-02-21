@@ -22,7 +22,7 @@ nano .env
 | `FUND_LND2_BTC` | No | `3` | BTC to fund lnd2 |
 | `CHANNEL_SATS` | No | `500000000` | Channel capacity in sats |
 | `REBALANCE_SATS` | No | `250000000` | Amount to push for balancing |
-| `RTL_IMAGE` | No | `shahanafarooqui/rtl:latest` | RTL Docker image |
+| `RTL_IMAGE` | No | `shahanafarooqui/rtl:v0.15.8` | RTL Docker image |
 | `RTL_PORT` | No | `3000` | RTL web UI port |
 | `RTL_PASSWORD` | No | *(WALLET_PASS)* | RTL login password |
 | `MOSTRO_IMAGE` | No | `mostrop2p/mostro:latest` | Mostro Docker image |
