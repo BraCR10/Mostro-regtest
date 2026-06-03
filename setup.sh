@@ -635,7 +635,7 @@ step_clean() {
   log "3/9" "Cleaning environment"
 
   docker compose -f "${BASE_DIR}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
-  docker rm -f "${NODES[@]}" rtl mostro satdress bitcoind nginx 2>/dev/null || true
+  docker rm -f "${NODES[@]}" rtl mostro satdress bitcoind 2>/dev/null || true
 
   for node in "${NODES[@]}"; do
     if [[ -d "${BASE_DIR}/${node}" ]]; then
