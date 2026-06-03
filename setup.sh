@@ -168,7 +168,7 @@ wait_ready() {
       return 0
     fi
     sleep 1
-    (( i++ ))
+    i=$(( i + 1 ))
   done
   return 1
 }
@@ -182,7 +182,7 @@ wait_wallet_unlocker() {
       return 0
     fi
     sleep 1
-    (( i++ ))
+    i=$(( i + 1 ))
   done
   return 1
 }
@@ -215,7 +215,7 @@ wait_bitcoind() {
       return 0
     fi
     sleep 1
-    (( i++ ))
+    i=$(( i + 1 ))
   done
   return 1
 }
@@ -1084,7 +1084,7 @@ step_domains() {
         break
       fi
       sleep 1
-      (( i++ ))
+      i=$(( i + 1 ))
     done
     if (( i >= 30 )); then
       fail "satdress not responding on 127.0.0.1:${SATDRESS_PORT}"
