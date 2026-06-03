@@ -572,7 +572,7 @@ relays = [
 $(IFS=',' ; for r in ${MOSTRO_RELAYS}; do echo "  \"${r}\","; done)
 ]
 log_level = "info"
-currencies = ["USD"]
+currencies_filter = ["USD"]
 user_mode = "admin"
 pow = 0
 EOF
