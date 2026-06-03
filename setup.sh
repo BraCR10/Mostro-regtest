@@ -1103,7 +1103,7 @@ step_domains() {
       local reg_resp
       reg_resp="$(curl -s -X POST "http://127.0.0.1:${SATDRESS_PORT}/grab" \
         -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "name=${uname}&kind=lnd&host=https://127.0.0.1:${PORTS[lnd1_rest]}&key=${mac_hex}" \
+        -d "name=${uname}&kind=lnd&host=https://127.0.0.1:${PORTS[lnd1_rest]}&key=${mac_hex}&nossl=true" \
         2>/dev/null)" || true
 
       if echo "$reg_resp" | grep -q '"name":"'"${uname}"'"'; then
