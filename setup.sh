@@ -912,9 +912,13 @@ step_mostro() {
   chmod 600 "${BASE_DIR}/mostro/nostr-private.txt"
   ok "Private key saved → mostro/nostr-private.txt"
 
-  echo "${MOSTRO_NPUB}" > "${BASE_DIR}/mostro/nostr-public.txt"
-  chmod 644 "${BASE_DIR}/mostro/nostr-public.txt"
-  ok "Public key  saved → mostro/nostr-public.txt  (${MOSTRO_NPUB})"
+  # Persist npub in .env so it survives a clean (npub is not secret)
+  if grep -q "^MOSTRO_NPUB=" "${BASE_DIR}/.env" 2>/dev/null; then
+    sed -i "s|^MOSTRO_NPUB=.*|MOSTRO_NPUB=${MOSTRO_NPUB}|" "${BASE_DIR}/.env"
+  else
+    echo "MOSTRO_NPUB=${MOSTRO_NPUB}" >> "${BASE_DIR}/.env"
+  fi
+  ok "Public key  saved → .env  (${MOSTRO_NPUB})"
 
   write_mostro_config
   ok "Mostro settings.toml written"
@@ -1166,9 +1170,9 @@ show_summary() {
   echo
   echo "  Mostro (P2P exchange on lnd1):"
   echo "    Relays: ${MOSTRO_RELAYS}"
-  echo "    Public key (npub): ${MOSTRO_NPUB}"
+  echo "    Public key (npub): ${MOSTRO_NPUB}  ← also in .env"
   echo "    Public key (hex):  ${MOSTRO_HEX}"
-  echo "    Private key: ${BASE_DIR}/mostro/nostr-private.txt"
+  echo "    Private key: ${BASE_DIR}/mostro/nostr-private.txt  (gitignored)"
   echo
 
   if [[ -n "${LNURL_DOMAIN}" ]]; then
