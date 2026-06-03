@@ -451,6 +451,76 @@ DOCKERFILE
   fi
 }
 
+# Derives npub from an nsec using a throwaway python:3-slim container (zero host deps).
+derive_npub() {
+  local nsec="$1"
+  local script
+  script="$(mktemp /tmp/npub.XXXXXX.py)"
+  cat > "$script" <<'PYEOF'
+import sys
+
+CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+P  = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+Gx = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+Gy = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+
+def convertbits(data, frombits, tobits, pad=True):
+    acc = 0; bits = 0; ret = []; maxv = (1 << tobits) - 1
+    for v in data:
+        acc = (acc << frombits) | v; bits += frombits
+        while bits >= tobits:
+            bits -= tobits; ret.append((acc >> bits) & maxv)
+    if pad and bits: ret.append((acc << (tobits - bits)) & maxv)
+    return ret
+
+def bech32_polymod(values):
+    GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]; chk = 1
+    for v in values:
+        b = chk >> 25; chk = (chk & 0x1ffffff) << 5 ^ v
+        for i in range(5): chk ^= GEN[i] if (b >> i) & 1 else 0
+    return chk
+
+def bech32_encode(hrp, data):
+    d = list(data)
+    exp = [ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp]
+    poly = bech32_polymod(exp + d + [0]*6) ^ 1
+    cs = [(poly >> 5*(5-i)) & 31 for i in range(6)]
+    return hrp + '1' + ''.join(CHARSET[x] for x in d + cs)
+
+def bech32_decode(bech):
+    bech = bech.lower(); pos = bech.rfind('1')
+    data = [CHARSET.find(x) for x in bech[pos+1:]]
+    return bytes(convertbits(data[:-6], 5, 8, False))
+
+def point_add(A, B):
+    if A is None: return B
+    if B is None: return A
+    if A[0] == B[0]:
+        if A[1] != B[1]: return None
+        m = 3 * A[0]**2 * pow(2 * A[1], P-2, P) % P
+    else:
+        m = (B[1] - A[1]) * pow(B[0] - A[0], P-2, P) % P
+    x = (m*m - A[0] - B[0]) % P
+    return (x, (m * (A[0] - x) - A[1]) % P)
+
+def point_mul(k, pt):
+    r = None; a = pt
+    while k:
+        if k & 1: r = point_add(r, a)
+        a = point_add(a, a); k >>= 1
+    return r
+
+privkey = int.from_bytes(bech32_decode(sys.argv[1]), 'big')
+pub = point_mul(privkey, (Gx, Gy))
+print(bech32_encode("npub", convertbits(list(pub[0].to_bytes(32, 'big')), 8, 5)))
+PYEOF
+  MOSTRO_NPUB="$(docker run --rm -v "${script}:/derive.py:ro" python:3-slim python3 /derive.py "$nsec" 2>/dev/null)"
+  rm -f "$script"
+  if [[ -z "$MOSTRO_NPUB" ]]; then
+    fail "Could not derive npub from provided nsec"
+  fi
+}
+
 create_wallet_rest() {
   local node="$1"
   local rest_port="${PORTS[${node}_rest]}"
@@ -832,9 +902,19 @@ step_mostro() {
     fi
   fi
 
+  # Derive npub if not already set (rana sets it; manual/env entry does not)
+  if [[ -z "${MOSTRO_NPUB:-}" ]]; then
+    echo "  Deriving public key from nsec..."
+    derive_npub "$MOSTRO_NSEC"
+  fi
+
   echo "${MOSTRO_NSEC}" > "${BASE_DIR}/mostro/nostr-private.txt"
   chmod 600 "${BASE_DIR}/mostro/nostr-private.txt"
-  ok "Private key saved to mostro/nostr-private.txt"
+  ok "Private key saved → mostro/nostr-private.txt"
+
+  echo "${MOSTRO_NPUB}" > "${BASE_DIR}/mostro/nostr-public.txt"
+  chmod 644 "${BASE_DIR}/mostro/nostr-public.txt"
+  ok "Public key  saved → mostro/nostr-public.txt  (${MOSTRO_NPUB})"
 
   write_mostro_config
   ok "Mostro settings.toml written"
