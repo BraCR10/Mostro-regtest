@@ -135,6 +135,7 @@ MOSTRO_HEX=""
 
 log()  { echo -e "\n\033[1;34m[$1]\033[0m $2"; }
 ok()   { echo -e "  \033[1;32m✔\033[0m $1"; }
+warn() { echo -e "  \033[1;33m⚠\033[0m $1"; }
 fail() { echo -e "  \033[1;31m✘\033[0m $1"; exit 1; }
 
 lncli() {
@@ -1051,11 +1052,12 @@ step_domains() {
     return
   fi
 
-  # ── Verify external nginx proxy is running ──
+  # ── Verify external nginx proxy is running (optional — warn, do not fail) ──
   if ! docker inspect nginx --format '{{.State.Running}}' 2>/dev/null | grep -q true; then
-    fail "nginx container is not running — start it first: cd ~/Server && docker compose up -d nginx"
+    warn "nginx container is not running — HTTPS domains will not be reachable until you start your reverse proxy"
+  else
+    ok "nginx proxy container is running"
   fi
-  ok "nginx proxy container is running"
 
   if [[ -n "${RTL_DOMAIN}" ]]; then
     if curl -sf --max-time 5 "https://${RTL_DOMAIN}" -o /dev/null 2>/dev/null; then
