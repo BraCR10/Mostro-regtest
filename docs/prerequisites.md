@@ -1,58 +1,35 @@
 # Prerequisites
 
-## 1. Bitcoin Core
+## Minimum requirements
 
-Download and install from: https://bitcoincore.org/en/download/
+| Resource | Minimum |
+|----------|---------|
+| CPU | 2 cores |
+| RAM | 4 GB |
+| Disk | 20 GB |
+| OS | Ubuntu 22.04+ / Debian 12+ |
 
-## 2. Configure Bitcoin Core for regtest
+## Required software
 
-Create or edit `~/.bitcoin/bitcoin.conf`:
+### Docker
 
-```ini
-server=1
-daemon=1
-txindex=1
-regtest=1
-
-[regtest]
-fallbackfee=0.0002
-rpcport=18443
-port=18444
-bind=127.0.0.1
-rpcbind=127.0.0.1
-rpcallowip=127.0.0.1
-rpcuser=YOUR_USER
-rpcpassword=YOUR_PASSWORD
-zmqpubrawblock=tcp://127.0.0.1:28332
-zmqpubrawtx=tcp://127.0.0.1:28333
-```
-
-> **Note:** `bind=127.0.0.1` ensures the P2P port (18444) only listens locally.
-
-Start bitcoind:
+The only local dependency. Install on Ubuntu/Debian:
 
 ```bash
-bitcoind -regtest -daemon
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+newgrp docker          # apply group change without logout
+docker --version       # verify
 ```
 
-Generate initial blocks (first time only):
+Everything else (bitcoind, LND, Mostro, MostriX, RTL) runs as Docker containers built by `setup.sh`. No Rust, no Bitcoin Core, no Python.
 
-```bash
-bitcoin-cli -regtest createwallet "miner"
-bitcoin-cli -regtest -rpcwallet=miner generatetoaddress 101 $(bitcoin-cli -regtest -rpcwallet=miner getnewaddress)
-```
+## Optional: external proxy (for public domains)
 
-## 3. Docker
+If you want `RTL_DOMAIN` or `LNURL_DOMAIN`, you also need:
 
-Docker and Docker Compose must be installed: https://docs.docker.com/engine/install/
+- A VPS with a public IP
+- Two DNS A records pointing your domains to that IP
+- nginx + certbot running in Docker (see [security.md](security.md))
 
-## 4. Firewall (recommended)
-
-Only SSH should be accessible from outside:
-
-```bash
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow 22/tcp
-sudo ufw enable
-```
+The proxy lives in `~/Server/` and is set up independently of `setup.sh`.

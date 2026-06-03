@@ -1,63 +1,87 @@
 # Mostro Regtest
 
-Automated setup for 3 LND regtest nodes (triangle topology), RTL web UI, and [Mostro](https://github.com/MostroP2P/mostro) P2P exchange — all on localhost.
+Fully Dockerized setup for a Bitcoin regtest node, 3 LND nodes (triangle topology), RTL web UI, and [Mostro](https://github.com/MostroP2P/mostro) P2P exchange.
+
+**Zero local dependencies** — only Docker is required. Minimum: 2 CPU cores, 4 GB RAM, 20 GB disk. bitcoind, LND, Mostro, MostriX, and RTL all run as Docker containers. Nothing is installed on the host.
 
 ## Quick start
 
-1. Install [prerequisites](docs/prerequisites.md) (Bitcoin Core, Docker, firewall)
-2. Configure and run:
-
 ```bash
+git clone https://github.com/BraCR10/Mostro-regtest ~/Mostro
+cd ~/Mostro
 cp .env.example .env
-nano .env   # set BITCOIND_RPC_USER and BITCOIND_RPC_PASS
+nano .env          # set WALLET_PASS at minimum (everything else has defaults)
 chmod +x setup.sh
 ./setup.sh
+```
 
-# Re-run from a specific step (skips earlier steps)
+Re-run from a specific step (skips earlier steps):
+
+```bash
 ./setup.sh --from 7
 ```
 
-The script will prompt for a wallet password (min 8 chars), or set `WALLET_PASS` in `.env` to skip the prompt.
-
 ## What the script does
 
-| Step | Description |
+| Step | What happens |
 |------|-------------|
-| 1/9 | Verifies prerequisites (docker, bitcoind, bitcoin-cli) |
-| 2/9 | Installs `jq` and `curl` (skips if already installed) |
-| 3/9 | Cleans previous environment (bitcoind is **not touched**) |
-| 4/9 | Asks for wallet password (or loads from `.env`) |
-| 5/9 | Writes LND + RTL configs, `docker-compose.yml`, starts LND |
-| 6/9 | Creates wallets, enables auto-unlock, starts RTL |
-| 7/9 | Sets up Mostro + MostriX: loads/prompts/generates Nostr key, starts Mostro on lnd1, builds MostriX TUI |
-| 8/9 | Funds wallets, opens and balances channels (triangle: lnd1↔lnd2, lnd3↔lnd1, lnd3↔lnd2) |
-| 9/9 | Domains + HTTPS via nginx (skipped if neither `RTL_DOMAIN` nor `LNURL_DOMAIN` is set) |
+| **1/9** | Verifies Docker is available and running |
+| **2/9** | Installs `jq` and `curl` if missing |
+| **3/9** | Stops and removes all containers, wipes generated data dirs |
+| **4/9** | Loads `WALLET_PASS` from `.env` or prompts interactively |
+| **5/9** | Builds bitcoind Docker image, generates `bitcoin.conf`, starts bitcoind, creates miner wallet, mines 101 initial blocks, writes LND + RTL configs, starts lnd1/lnd2/lnd3 |
+| **6/9** | Creates LND wallets via REST API, enables auto-unlock on restart, starts RTL |
+| **7/9** | Builds Mostro Docker image from source, handles Nostr key (`.env` / prompt / auto-generate), builds MostriX Docker image, starts Mostro on lnd1 |
+| **8/9** | Funds all nodes from the miner wallet, opens and balances channels in triangle topology (lnd1↔lnd2, lnd3↔lnd1, lnd3↔lnd2) |
+| **9/9** | Verifies nginx proxy is running, starts satdress, registers Lightning Address usernames (skipped if no domains set) |
+
+## Architecture
+
+All services use Docker host networking and bind to `127.0.0.1`. Nothing is exposed to the internet directly — nginx (managed separately in `~/Server/`) is the only public-facing component.
+
+```
+                        Internet
+                           │
+                    nginx (~/Server/)
+                    ports 80 / 443
+                    ┌──────┴──────┐
+              btcpanel.website   lndpanel.site
+                    │                  │
+              RTL :3000         satdress :17422
+                                       │
+  bitcoind ──── lnd1 ──── lnd2        lnd1
+   :18443        │          │
+                lnd3 ──────┘
+```
+
+## Channel topology
+
+```
+    lnd1 (8 BTC)
+   /    \
+lnd3 ── lnd2
+(6 BTC) (3 BTC)
+```
+
+Each channel is opened and balanced so both sides have roughly equal liquidity.
+
+## Shell shortcuts
+
+After setup and `source ~/.bashrc`:
+
+| Command | Description |
+|---------|-------------|
+| `mostro-logs` | Last 100 lines of Mostro logs, follows in real time |
+| `mostrix` | Launch MostriX TUI (orders, trades, admin) |
+| `bcli <cmd>` | Run `bitcoin-cli` against the regtest node |
 
 ## Documentation
 
-- [Prerequisites](docs/prerequisites.md) — Bitcoin Core, Docker, firewall setup
-- [Configuration](docs/configuration.md) — `.env` options, directory structure, ports
-- [RTL (Ride The Lightning)](docs/rtl.md) — web UI access methods (local, SSH tunnel, reverse proxy)
-- [Mostro + MostriX](docs/mostro.md) — P2P exchange setup, MostriX TUI client, Nostr key options
-- [Security](docs/security.md) — defense-in-depth, port verification
-- [Commands](docs/commands.md) — lncli, logs, mining, Docker management
-- [LNURL and Lightning Address](docs/lnurl.md) — domain, DNS, how the protocol works
-
-## Useful commands
-
-```bash
-# MostriX — TUI client for Mostro (orders, trades, admin)
-mostrix
-
-# lncli (each node has its own RPC port: 10009, 10010, 10011)
-docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:10009 getinfo
-docker exec lnd3 lncli --network=regtest --rpcserver=127.0.0.1:10011 listchannels
-
-# Logs
-cd ~/BTC/lnd && docker compose logs -f mostro
-
-# Mine blocks
-bitcoin-cli -regtest -rpcwallet=miner generatetoaddress 1 $(bitcoin-cli -regtest -rpcwallet=miner getnewaddress)
-```
-
-See [docs/commands.md](docs/commands.md) for more.
+- [Prerequisites](docs/prerequisites.md) — what you need before running setup
+- [Configuration](docs/configuration.md) — `.env` variables, directory structure, ports
+- [Setup steps](docs/setup-steps.md) — detailed breakdown of each step
+- [Commands](docs/commands.md) — day-to-day commands for lncli, logs, mining
+- [Mostro + MostriX](docs/mostro.md) — P2P exchange, Nostr keys, MostriX TUI
+- [RTL](docs/rtl.md) — web UI access
+- [LNURL and Lightning Address](docs/lnurl.md) — Lightning Address via satdress
+- [Security](docs/security.md) — firewall, nginx proxy, port model

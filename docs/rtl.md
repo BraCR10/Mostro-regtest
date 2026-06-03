@@ -1,58 +1,36 @@
 # RTL (Ride The Lightning)
 
-RTL is a web UI for managing Lightning nodes. After setup completes, it's available at:
+RTL is a web UI for managing Lightning nodes. All three nodes (lnd1, lnd2, lnd3) are available via a dropdown selector. Default URL: `http://127.0.0.1:3000`.
 
-```
-http://127.0.0.1:3000
-```
-
-All three LND nodes are available in the UI via a dropdown selector. The RTL password defaults to your `WALLET_PASS`. Set `RTL_PASSWORD` in `.env` to use a different one.
+Password: `RTL_PASSWORD` from `.env`, or `WALLET_PASS` if not set.
 
 ## Accessing RTL
 
-RTL binds to `127.0.0.1` by default (localhost only, not reachable from the internet). How you access it depends on where you're running the setup:
+RTL binds to `127.0.0.1` — not directly reachable from the internet.
 
 ### Local machine
 
-If you're running this on your own computer, just open `http://localhost:3000` in your browser. No extra steps needed.
+Open `http://localhost:3000` directly. No extra steps.
 
-### VPS — SSH tunnel (recommended)
+### VPS — SSH tunnel
 
-The safest way to access RTL on a remote server. Nothing is exposed to the internet.
-
-From your local machine, open the tunnel:
+Safest option. Nothing exposed to the internet.
 
 ```bash
+# From your local machine
 ssh -L 3000:127.0.0.1:3000 user@your-vps-ip
 ```
 
-Then open `http://localhost:3000` in your local browser. The tunnel stays open as long as the SSH session is active.
+Then open `http://localhost:3000` in your local browser.
 
-### VPS — Open port directly (not recommended)
+### VPS — Custom domain with HTTPS
 
-You can bind RTL to `0.0.0.0` so it's accessible from the internet. **This exposes RTL to anyone** — only do this if you understand the risk and have additional protections (strong password, fail2ban, etc.).
-
-To do this, edit `rtl/RTL-Config.json` after running the script and change:
-
-```json
-"host": "0.0.0.0"
-```
-
-Then allow the port through the firewall and restart:
+Set `RTL_DOMAIN` in `.env` and configure the nginx proxy in `~/Server/`. The proxy handles TLS termination and proxies to RTL on `127.0.0.1:3000` with WebSocket support.
 
 ```bash
-sudo ufw allow 3000/tcp
-cd ~/BTC/lnd && docker compose restart rtl
-```
-
-### VPS — Custom domain with HTTPS (recommended for public access)
-
-Set `RTL_DOMAIN` in `.env` and the setup script handles everything automatically — certbot obtains a TLS certificate and nginx is configured as a reverse proxy with WebSocket support:
-
-```bash
+# .env
 RTL_DOMAIN=btcpanel.website
+RTL_PASSWORD=yourpassword
 ```
 
-After setup, RTL is available at `https://btcpanel.website`. RTL stays bound to `127.0.0.1` — nginx is the only service listening on public ports.
-
-Requires a DNS A record pointing `btcpanel.website` to your server's IP before running the script.
+See [security.md](security.md) for the nginx proxy setup.

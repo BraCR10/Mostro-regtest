@@ -1,99 +1,155 @@
-# Useful commands
+# Commands
 
-## MostriX
-
-MostriX is the TUI client for interacting with Mostro. Launch it with:
+Shell aliases installed by `setup.sh` (active after `source ~/.bashrc`):
 
 ```bash
-mostrix
+mostro-logs     # last 100 lines of Mostro logs + follow
+mostrix         # launch MostriX TUI
+bcli <cmd>      # bitcoin-cli against the regtest node
 ```
 
-Use arrow keys to navigate tabs and lists, Enter to select, Q to quit. Toggle admin mode with M.
+---
 
-Configuration: `~/.mostrix/settings.toml`
+## bitcoin-cli
+
+The `bcli` alias wraps `docker exec bitcoind bitcoin-cli -regtest` with the configured RPC credentials.
+
+```bash
+# Node info
+bcli getblockchaininfo
+bcli getblockcount
+
+# Mine a block
+bcli -rpcwallet=miner generatetoaddress 1 $(bcli -rpcwallet=miner getnewaddress)
+
+# Mine 6 blocks (confirm transactions)
+bcli -rpcwallet=miner generatetoaddress 6 $(bcli -rpcwallet=miner getnewaddress)
+
+# Check miner balance
+bcli -rpcwallet=miner getbalance
+
+# Send to address
+bcli -rpcwallet=miner sendtoaddress <address> <amount>
+```
+
+---
 
 ## lncli
 
-Each LND node has its own RPC port:
+Each LND node has its own gRPC port.
 
 ```bash
-# lnd1
+# lnd1 — gRPC port 10009
 docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:10009 getinfo
 
-# lnd2
+# lnd2 — gRPC port 10010
 docker exec lnd2 lncli --network=regtest --rpcserver=127.0.0.1:10010 getinfo
 
-# lnd3
+# lnd3 — gRPC port 10011
 docker exec lnd3 lncli --network=regtest --rpcserver=127.0.0.1:10011 getinfo
 ```
 
-Common commands:
+Common lncli commands (replace `lnd1` / `10009` as needed):
 
 ```bash
-# Wallet balance
+# Balances
 docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:10009 walletbalance
-
-# Channel balances
 docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:10009 channelbalance
 
-# List channels
+# Channels
 docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:10009 listchannels
+docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:10009 pendingchannels
 
-# List peers
+# Peers
 docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:10009 listpeers
+
+# Create invoice
+docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:10009 addinvoice --amt=10000
+
+# Pay invoice
+docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:10009 payinvoice --force <bolt11>
 ```
+
+---
 
 ## Logs
 
-The setup script installs `mostro-logs` as a bash command. It shows the last 100 lines and follows new output in real time:
-
 ```bash
+# Mostro — last 100 lines + follow
 mostro-logs
-```
 
-For other services, use docker compose directly:
-
-```bash
 # All services
-cd ~/BTC/lnd && docker compose logs -f
+cd ~/Mostro && docker compose logs -f
 
 # Specific service
-cd ~/BTC/lnd && docker compose logs -f rtl
-cd ~/BTC/lnd && docker compose logs -f lnd1
-cd ~/BTC/lnd && docker compose logs -f lnd3
-cd ~/BTC/lnd && docker compose logs -f mostro
+cd ~/Mostro && docker compose logs -f lnd1
+cd ~/Mostro && docker compose logs -f rtl
+cd ~/Mostro && docker compose logs -f bitcoind
+
+# Setup run logs (saved automatically)
+ls ~/Mostro/logs/
+cat ~/Mostro/logs/setup-<timestamp>.log
 ```
 
-## Mining blocks
-
-Generate regtest blocks to confirm transactions:
-
-```bash
-bitcoin-cli -regtest -rpcwallet=miner generatetoaddress 1 $(bitcoin-cli -regtest -rpcwallet=miner getnewaddress)
-```
-
-## Port verification
-
-Confirm no services are exposed to the internet:
-
-```bash
-# Without domains: should only show port 22
-# With RTL_DOMAIN or LNURL_DOMAIN: also ports 80, 443 (nginx)
-ss -tlnp | grep -v 127.0.0
-```
+---
 
 ## Docker management
 
 ```bash
-# Restart all services
-cd ~/BTC/lnd && docker compose restart
+# Status of all containers
+docker ps
 
-# Stop everything
-cd ~/BTC/lnd && docker compose down
+# Restart everything
+cd ~/Mostro && docker compose restart
 
-# Re-run setup from scratch
-cd ~/BTC/lnd && ./setup.sh
+# Stop everything (keeps data)
+cd ~/Mostro && docker compose down
 
-# Re-run from a specific step (e.g., rebuild Mostro + MostriX only)
-cd ~/BTC/lnd && ./setup.sh --from 7
+# Stop + wipe all data (full reset)
+./setup.sh
+
+# Re-run from a specific step
+./setup.sh --from 5    # rebuild bitcoind + LND
+./setup.sh --from 6    # recreate wallets
+./setup.sh --from 7    # rebuild Mostro + MostriX
+./setup.sh --from 8    # re-fund + re-open channels
+./setup.sh --from 9    # redo satdress + Lightning Address
+```
+
+---
+
+## MostriX
+
+```bash
+# Launch the TUI
+mostrix
+
+# Key bindings
+# Left/Right — switch tabs
+# Up/Down    — navigate lists
+# Enter      — select/confirm
+# Q          — quit
+# M          — toggle User/Admin mode
+# C          — copy invoice to clipboard
+# Esc        — cancel/close popup
+
+# Config location
+cat ~/.mostrix/settings.toml
+```
+
+---
+
+## Seeds and keys
+
+```bash
+# LND wallet seeds (back these up)
+cat ~/Mostro/lnd1/data/seed.txt
+cat ~/Mostro/lnd2/data/seed.txt
+cat ~/Mostro/lnd3/data/seed.txt
+
+# Mostro Nostr private key
+cat ~/Mostro/mostro/nostr-private.txt
+
+# Setup summary (ports, keys, addresses)
+cat ~/Mostro/summary.txt
 ```

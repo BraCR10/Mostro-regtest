@@ -1,43 +1,98 @@
 # Security
 
-Defense in depth — only what's necessary is exposed to the internet:
+## Port model
 
-| Layer | What it does |
-|-------|--------------|
-| **ufw** | Blocks all incoming traffic except SSH (22) and, if any domain is enabled, HTTP/HTTPS (80/443) |
-| **bind 127.0.0.1** | bitcoind, LND, RTL, Mostro, and satdress only listen on localhost |
-| **nginx** | The only service on 0.0.0.0 — reverse proxies HTTPS to configured domains only |
-| **SSH tunnel** | The way to reach internal services remotely (unless `RTL_DOMAIN` exposes RTL via HTTPS) |
+All services from `setup.sh` bind to `127.0.0.1` — unreachable from the internet by design. The only thing exposed publicly is the nginx proxy in `~/Server/`.
 
-## What's exposed to the internet
+```
+Internet
+   │
+   ▼
+nginx (~/Server/)         ← only public-facing component
+ports 80 / 443
+   │
+   ├── btcpanel.website → RTL     (127.0.0.1:3000)
+   └── lndpanel.site   → satdress (127.0.0.1:17422)
 
-| Port | Service | When |
-|------|---------|------|
-| 22 | SSH | Always |
-| 80 | nginx (HTTP → HTTPS redirect) | Only if `RTL_DOMAIN` or `LNURL_DOMAIN` is set |
-| 443 | nginx (HTTPS → configured services) | Only if `RTL_DOMAIN` or `LNURL_DOMAIN` is set |
-
-nginx only proxies to explicitly configured domains:
-- **`RTL_DOMAIN`** → RTL web UI (`127.0.0.1:3000`). RTL is password-protected. Use a strong `RTL_PASSWORD`.
-- **`LNURL_DOMAIN`** → satdress (`127.0.0.1:17422`), which serves Lightning Address endpoints.
-
-Each domain gets its own nginx server block and TLS certificate. Your LND nodes, Mostro, bitcoind, and macaroons are **not** reachable through nginx.
-
-## Without any domains
-
-If neither `RTL_DOMAIN` nor `LNURL_DOMAIN` is set, nothing changes — only port 22 is open. No nginx, no ports 80/443.
-
-## Verifying
-
-```bash
-# Check what's listening on public interfaces (not 127.0.0.1)
-ss -tlnp | grep -v 127.0.0
-
-# Without domains: should only show port 22
-# With RTL_DOMAIN or LNURL_DOMAIN: also ports 22, 80, 443 (nginx)
-
-# Verify nginx doesn't leak internal services
-curl -s https://yourdomain.com/v1/getinfo                  # should NOT return LND data
+Everything else: 127.0.0.1 only
+  bitcoind   :18443 (RPC)  :18444 (P2P)  :28332/:28333 (ZMQ)
+  lnd1       :9735  (P2P)  :10009 (gRPC) :8080  (REST)
+  lnd2       :9736          :10010         :8081
+  lnd3       :9737          :10011         :8082
+  RTL        :3000
+  satdress   :17422
 ```
 
-All Docker containers use `network_mode: host` and bind to `127.0.0.1`, so even without ufw, services are only reachable locally. The firewall adds a second layer of protection.
+## Firewall (ufw)
+
+Only three ports open to the internet:
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow 22/tcp    # SSH
+sudo ufw allow 80/tcp    # HTTP (certbot challenge + redirect)
+sudo ufw allow 443/tcp   # HTTPS (nginx proxy)
+sudo ufw --force enable
+```
+
+Even without the firewall, services bound to `127.0.0.1` can't receive external connections. ufw is a second layer.
+
+## nginx proxy (~/Server/)
+
+nginx runs as a Docker container and is managed independently of `setup.sh`:
+
+```
+~/Server/
+├── docker-compose.yml
+└── nginx/
+    ├── conf.d/
+    │   ├── rtl.conf        # btcpanel.website → RTL
+    │   └── lnurl.conf      # lndpanel.site → satdress
+    └── certbot/
+        ├── conf/           # Let's Encrypt certs
+        └── www/            # ACME challenge webroot
+```
+
+nginx only proxies to explicitly configured domains. LND, Mostro, bitcoind, and macaroons are not reachable through it.
+
+## SSL certificates
+
+Certificates are obtained via certbot (Docker) and renewed automatically via a daily cron job:
+
+```bash
+# Manual renewal (if needed)
+docker run --rm \
+  -v ~/Server/nginx/certbot/conf:/etc/letsencrypt \
+  -v ~/Server/nginx/certbot/www:/var/www/certbot \
+  certbot/certbot renew --quiet
+
+docker exec nginx nginx -s reload
+```
+
+The cron job runs at 3am daily and only acts when a cert is within 30 days of expiry.
+
+## Verification
+
+```bash
+# Check what's listening on public interfaces
+ss -tlnp | grep -v 127.0.0
+# Should only show: 22, 80, 443
+
+# Verify nginx doesn't leak internal services
+curl -s https://btcpanel.website/v1/getinfo    # should NOT return LND data
+curl -s https://btcpanel.website/admin.macaroon # should return 404
+
+# Check firewall status
+sudo ufw status verbose
+```
+
+## Sensitive files
+
+| File | Contains | Protection |
+|------|----------|------------|
+| `mostro/nostr-private.txt` | Mostro nsec key | chmod 600, git-ignored |
+| `lndN/data/seed.txt` | 24-word wallet seed | chmod 600, git-ignored |
+| `lndN/data/wallet-password.txt` | Wallet unlock password | chmod 600, git-ignored |
+| `.env` | All credentials | git-ignored |
+| `summary.txt` | Keys + addresses summary | chmod 600, git-ignored |

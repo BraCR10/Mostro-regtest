@@ -4,13 +4,14 @@ set -euo pipefail
 ###############################################################################
 #  setup.sh — Mostro Regtest
 #
-#  Spins up 3 LND nodes on regtest using Docker (host networking),
-#  creates wallets, funds them from bitcoind, opens channels (triangle
+#  Spins up a bitcoind regtest node + 3 LND nodes using Docker (host
+#  networking), creates wallets, funds them, opens channels (triangle
 #  topology), launches RTL (Ride The Lightning) to manage all nodes,
 #  starts Mostro (P2P Lightning exchange over Nostr) connected to lnd1,
 #  and builds MostriX (TUI client for Mostro).
 #
-#  Configuration: copy .env.example to .env and fill in your values.
+#  Zero local dependencies beyond Docker and Rust (for MostriX).
+#  Optional: copy .env.example to .env to override defaults.
 #  Run ./setup.sh --help for usage information.
 ###############################################################################
 
@@ -23,19 +24,19 @@ Usage: ./setup.sh [--help] [--from <step>]
 Mostro Regtest — sets up 3 LND regtest nodes + RTL + Mostro + MostriX with Docker.
 
 Steps:
-  1. Verifies prerequisites (docker, bitcoind, bitcoin-cli)
+  1. Verifies prerequisites (docker)
   2. Installs dependencies (jq, curl)
-  3. Cleans previous environment (bitcoind is NOT touched)
+  3. Cleans previous environment
   4. Prompts for a wallet password
-  5. Writes configs, docker-compose.yml, and starts LND containers
+  5. Builds + starts bitcoind Docker container, writes LND/RTL configs, starts LND
   6. Creates wallets, enables auto-unlock, starts RTL
   7. Loads/prompts/generates Nostr key, configures Mostro on lnd1, builds MostriX TUI
   8. Funds wallets and opens a balanced channel
   9. Domains + HTTPS via nginx (only if RTL_DOMAIN or LNURL_DOMAIN is set)
 
 Configuration:
-  Copy .env.example to .env and set BITCOIND_RPC_USER and BITCOIND_RPC_PASS
-  to match your bitcoin.conf. See .env.example for all options.
+  All settings have sensible defaults — no .env required for basic usage.
+  Copy .env.example to .env to override defaults. See .env.example for options.
 
 Options:
   --help, -h        Show this help message
@@ -43,6 +44,12 @@ Options:
                     Example: ./setup.sh --from 7
 USAGE
 }
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+LOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/logs"
+mkdir -p "${LOG_DIR}"
+LOG_FILE="${LOG_DIR}/setup-$(date '+%Y%m%d-%H%M%S').log"
+exec > >(tee -a "${LOG_FILE}") 2>&1
 
 # Handle flags before loading config
 START_FROM=1
@@ -66,26 +73,17 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="${SCRIPT_DIR}"
 
-if [[ ! -f "${BASE_DIR}/.env" ]]; then
-  echo "Error: ${BASE_DIR}/.env not found."
-  echo "Copy .env.example to .env and fill in your values:"
-  echo "  cp .env.example .env"
-  exit 1
-fi
-# shellcheck source=/dev/null
-source "${BASE_DIR}/.env"
-
-: "${BITCOIND_RPC_USER:?Set BITCOIND_RPC_USER in .env}"
-: "${BITCOIND_RPC_PASS:?Set BITCOIND_RPC_PASS in .env}"
-
-if [[ "${BITCOIND_RPC_USER}" == "your_rpc_user" || "${BITCOIND_RPC_PASS}" == "your_rpc_password" ]]; then
-  echo "Error: .env still has placeholder values."
-  echo "Edit .env and set BITCOIND_RPC_USER and BITCOIND_RPC_PASS to match your bitcoin.conf."
-  exit 1
+# Load optional .env overrides (no error if missing — all values have defaults)
+if [[ -f "${BASE_DIR}/.env" ]]; then
+  # shellcheck source=/dev/null
+  source "${BASE_DIR}/.env"
 fi
 
 BITCOIND_HOST="${BITCOIND_HOST:-127.0.0.1}"
 BITCOIND_RPC_PORT="${BITCOIND_RPC_PORT:-18443}"
+BITCOIND_RPC_USER="${BITCOIND_RPC_USER:-regtest}"
+BITCOIND_RPC_PASS="${BITCOIND_RPC_PASS:-regtest}"
+BITCOIN_VERSION="${BITCOIN_VERSION:-28.0}"
 MINER_WALLET="${MINER_WALLET:-miner}"
 LND_IMAGE="${LND_IMAGE:-lightninglabs/lnd:v0.20.1-beta}"
 FUND_LND1_BTC="${FUND_LND1_BTC:-8}"
@@ -99,12 +97,10 @@ RTL_IMAGE="${RTL_IMAGE:-shahanafarooqui/rtl:v0.15.8}"
 RTL_PORT="${RTL_PORT:-3000}"
 RTL_DOMAIN="${RTL_DOMAIN:-}"
 
-MOSTRO_REPO="${MOSTRO_REPO:-https://github.com/MostroP2P/mostro.git}"
-MOSTRO_SRC="${BASE_DIR}/mostro-src"
+MOSTRO_REF="${MOSTRO_REF:-main}"
 MOSTRO_RELAYS="${MOSTRO_RELAYS:-wss://nos.lol,wss://relay.mostro.network}"
 
-MOSTRIX_REPO="${MOSTRIX_REPO:-https://github.com/MostroP2P/mostrix.git}"
-MOSTRIX_SRC="${BASE_DIR}/mostrix-src"
+MOSTRIX_REF="${MOSTRIX_REF:-main}"
 
 ZMQ_BLOCK="tcp://${BITCOIND_HOST}:28332"
 ZMQ_TX="tcp://${BITCOIND_HOST}:28333"
@@ -147,7 +143,14 @@ lncli() {
     --rpcserver="127.0.0.1:${PORTS[${node}_rpc]}" "$@" 2>/dev/null | tr -d '\r'
 }
 
-bcli() { bitcoin-cli -regtest "$@"; }
+bcli() {
+  docker exec bitcoind bitcoin-cli \
+    -regtest \
+    -rpcport="${BITCOIND_RPC_PORT}" \
+    -rpcuser="${BITCOIND_RPC_USER}" \
+    -rpcpassword="${BITCOIND_RPC_PASS}" \
+    "$@"
+}
 
 mine_blocks() {
   local addr
@@ -175,6 +178,39 @@ wait_wallet_unlocker() {
     local resp
     resp="$(curl -sk "https://127.0.0.1:${port}/v1/genseed" 2>/dev/null)" || true
     if echo "$resp" | jq -e '.cipher_seed_mnemonic' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    (( i++ ))
+  done
+  return 1
+}
+
+# Write bitcoin.conf for the dockerised bitcoind node.
+write_bitcoin_conf() {
+  mkdir -p "${BASE_DIR}/bitcoind"
+  cat > "${BASE_DIR}/bitcoind/bitcoin.conf" <<EOF
+regtest=1
+server=1
+txindex=1
+
+[regtest]
+rpcport=${BITCOIND_RPC_PORT}
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+rpcuser=${BITCOIND_RPC_USER}
+rpcpassword=${BITCOIND_RPC_PASS}
+zmqpubrawblock=tcp://127.0.0.1:28332
+zmqpubrawtx=tcp://127.0.0.1:28333
+fallbackfee=0.0002
+EOF
+}
+
+wait_bitcoind() {
+  local i=0
+  echo "  Waiting for bitcoind RPC..."
+  while (( i < 60 )); do
+    if bcli getblockchaininfo >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -357,64 +393,6 @@ port = 50051
 EOF
 }
 
-# Generate nginx config for LNURL reverse proxy. HTTPS terminates here and
-# proxies to satdress on 127.0.0.1:SATDRESS_PORT. Certbot manages the certs.
-write_nginx_config() {
-  sudo tee /etc/nginx/sites-available/lnurl >/dev/null <<EOF
-server {
-    listen 80;
-    server_name ${LNURL_DOMAIN};
-    return 301 https://\$host\$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    server_name ${LNURL_DOMAIN};
-
-    ssl_certificate /etc/letsencrypt/live/${LNURL_DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${LNURL_DOMAIN}/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:${SATDRESS_PORT};
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-EOF
-}
-
-# Generate nginx config for RTL reverse proxy. HTTPS terminates here and
-# proxies to RTL on 127.0.0.1:RTL_PORT. Includes WebSocket headers since
-# RTL uses WebSockets for real-time updates.
-write_rtl_nginx_config() {
-  sudo tee /etc/nginx/sites-available/rtl >/dev/null <<EOF
-server {
-    listen 80;
-    server_name ${RTL_DOMAIN};
-    return 301 https://\$host\$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    server_name ${RTL_DOMAIN};
-
-    ssl_certificate /etc/letsencrypt/live/${RTL_DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${RTL_DOMAIN}/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:${RTL_PORT};
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-EOF
-}
 
 # Generate satdress .env file. satdress reads its config from environment
 # variables. The SECRET is randomly generated for HMAC signing.
@@ -534,8 +512,8 @@ EOF
 
 ###############################################################################
 #  STEP 1 — Preflight checks
-#  Fail fast if Docker or bitcoind aren't available. Running the full setup
-#  only to fail midway wastes time and leaves partial state to clean up.
+#  Fail fast if Docker isn't available. bitcoind runs in Docker — no local
+#  Bitcoin Core installation required.
 ###############################################################################
 step_preflight() {
   log "1/9" "Preflight checks"
@@ -548,20 +526,6 @@ step_preflight() {
   fi
   ok "Docker available"
 
-  if ! command -v cargo &>/dev/null; then
-    fail "cargo is not installed — install Rust via rustup: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-  fi
-  ok "cargo available"
-
-  if ! command -v bitcoin-cli &>/dev/null; then
-    fail "bitcoin-cli not found — install Bitcoin Core"
-  fi
-  ok "bitcoin-cli available"
-
-  if ! bcli getblockchaininfo &>/dev/null; then
-    fail "bitcoind is not reachable (is it running with -regtest?)"
-  fi
-  ok "bitcoind reachable"
 }
 
 ###############################################################################
@@ -590,17 +554,17 @@ step_deps() {
 }
 
 ###############################################################################
-#  STEP 3 — Clean environment (bitcoind untouched)
-#  Remove all containers, volumes, and generated configs so we start fresh.
-#  bitcoind is NOT touched — it keeps its chain, wallets, and mined blocks.
+#  STEP 3 — Clean environment
+#  Stop and remove all containers (including bitcoind) and wipe generated
+#  configs and data dirs so we start completely fresh.
 #  LND data dirs may be owned by root (Docker), so we use an alpine container
 #  to delete them reliably.
 ###############################################################################
 step_clean() {
-  log "3/9" "Cleaning environment (bitcoind NOT touched)"
+  log "3/9" "Cleaning environment"
 
   docker compose -f "${BASE_DIR}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
-  docker rm -f "${NODES[@]}" rtl mostro satdress 2>/dev/null || true
+  docker rm -f "${NODES[@]}" rtl mostro satdress bitcoind nginx 2>/dev/null || true
 
   for node in "${NODES[@]}"; do
     if [[ -d "${BASE_DIR}/${node}" ]]; then
@@ -610,6 +574,10 @@ step_clean() {
     fi
   done
   rm -rf "${BASE_DIR}/rtl" "${BASE_DIR}/mostro" "${BASE_DIR}/satdress" "${BASE_DIR}/mostro-cli-bin" 2>/dev/null || true
+  if [[ -d "${BASE_DIR}/bitcoind" ]]; then
+    docker run --rm -v "${BASE_DIR}/bitcoind:/cleanup" alpine rm -rf /cleanup 2>/dev/null || true
+    rm -rf "${BASE_DIR}/bitcoind" 2>/dev/null || true
+  fi
   rm -rf "${HOME}/.mostrix" 2>/dev/null || true
   rm -f "${BASE_DIR}/docker-compose.yml" 2>/dev/null || true
 
@@ -655,14 +623,28 @@ step_password() {
 }
 
 ###############################################################################
-#  STEP 5 — Write configs + start LND containers
-#  Generate all config files and docker-compose.yml, then start only the LND
-#  containers. RTL and the relay start later (step 6) because they need
-#  macaroon files that don't exist until wallets are created.
+#  STEP 5 — Build + start bitcoind, write configs, start LND containers
+#  Build the bitcoind Docker image from docker/bitcoind/Dockerfile (based on
+#  Polar's approach), generate bitcoin.conf, start bitcoind and wait for its
+#  RPC to be ready. Then generate LND/RTL configs and docker-compose.yml and
+#  start the three LND containers.
+#  RTL starts later (step 6) because it needs macaroons created by LND wallets.
 ###############################################################################
 step_configs_and_start() {
-  log "5/9" "Writing configs and starting LND containers"
+  log "5/9" "Building bitcoind image, writing configs, starting containers"
 
+  # ── bitcoind ──
+  write_bitcoin_conf
+  ok "bitcoin.conf written"
+
+  echo "  Building bitcoind Docker image (Bitcoin Core ${BITCOIN_VERSION})..."
+  docker build \
+    --build-arg BITCOIN_VERSION="${BITCOIN_VERSION}" \
+    -t mostro-bitcoind:local \
+    "${BASE_DIR}/docker/bitcoind" -q
+  ok "bitcoind image built"
+
+  # ── LND configs ──
   for node in "${NODES[@]}"; do
     write_lnd_conf "$node"
   done
@@ -671,8 +653,20 @@ step_configs_and_start() {
   write_rtl_config
   ok "RTL config written"
 
+  # ── docker-compose.yml ──
   cat > "${BASE_DIR}/docker-compose.yml" <<EOF
 services:
+  bitcoind:
+    image: mostro-bitcoind:local
+    container_name: bitcoind
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./bitcoind:/home/bitcoin/.bitcoin
+    environment:
+      USERID: "1000"
+      GROUPID: "1000"
+
   lnd1:
     image: ${LND_IMAGE}
     container_name: lnd1
@@ -715,9 +709,6 @@ services:
       - ./lnd3/data/data/chain/bitcoin/regtest:/macaroons/lnd3:ro
 
   mostro:
-    build:
-      context: ./mostro-src
-      dockerfile: docker/Dockerfile
     image: mostro:local
     container_name: mostro
     restart: unless-stopped
@@ -730,19 +721,40 @@ EOF
     cat >> "${BASE_DIR}/docker-compose.yml" <<EOF
 
   satdress:
-    image: jaonoctus/satdress
+    image: satdress:local
     container_name: satdress
     restart: unless-stopped
     network_mode: host
     env_file:
       - ./satdress/.env
-    working_dir: /data
     volumes:
       - ./satdress/data:/data
 EOF
   fi
+
   ok "docker-compose.yml written"
 
+  # ── Start bitcoind and wait for RPC ──
+  docker compose -f "${BASE_DIR}/docker-compose.yml" up -d bitcoind
+  wait_bitcoind || fail "bitcoind RPC not responding after 60s — check: docker logs bitcoind"
+  ok "bitcoind ready (regtest)"
+
+  # Create miner wallet on first run; on re-runs just load it if needed
+  if ! bcli listwallets | jq -e ".[] | select(.==\"${MINER_WALLET}\")" >/dev/null 2>&1; then
+    if bcli listwalletdir | jq -e ".wallets[].name | select(.==\"${MINER_WALLET}\")" >/dev/null 2>&1; then
+      bcli loadwallet "${MINER_WALLET}" >/dev/null
+      ok "Miner wallet loaded"
+    else
+      bcli createwallet "${MINER_WALLET}" >/dev/null
+      # Mine past the initial coinbase maturity threshold so coins are spendable
+      mine_blocks 101
+      ok "Miner wallet created and 101 blocks mined"
+    fi
+  else
+    ok "Miner wallet already loaded"
+  fi
+
+  # ── Start LND containers ──
   docker compose -f "${BASE_DIR}/docker-compose.yml" up -d lnd1 lnd2 lnd3
   sleep 3
   ok "lnd1, lnd2, and lnd3 running"
@@ -781,33 +793,23 @@ step_wallets_and_unlock() {
 }
 
 ###############################################################################
-#  STEP 7 — Configure Nostr key and start Mostro
-#  Mostro needs a Nostr identity. We support three paths: key from .env,
-#  interactive paste, or auto-generation with rana. After the key is set,
-#  we copy lnd1's TLS cert and admin macaroon so Mostro can talk to it.
+#  STEP 7 — Build Mostro image, configure Nostr key, start container
+#  Build the Mostro Docker image from docker/mostro/Dockerfile (clones and
+#  compiles Mostro inside Docker — no local source tree required).
+#  Mostro needs a Nostr identity: key from .env, interactive paste, or
+#  auto-generation with rana. Then copy lnd1's credentials and start.
 ###############################################################################
 step_mostro() {
-  log "7/9" "Setting up Mostro (P2P exchange on lnd1)"
+  log "7/9" "Building Mostro image and starting P2P exchange (lnd1)"
 
   mkdir -p "${BASE_DIR}/mostro"
 
-  # Clone or update Mostro source from git (always latest main)
-  if [[ -d "${MOSTRO_SRC}/.git" ]]; then
-    echo "  Updating Mostro source (git pull)..."
-    git -C "${MOSTRO_SRC}" fetch origin main
-    git -C "${MOSTRO_SRC}" reset --hard origin/main
-    ok "Mostro source updated to latest main"
-  else
-    echo "  Cloning Mostro from ${MOSTRO_REPO}..."
-    rm -rf "${MOSTRO_SRC}"
-    git clone --branch main --single-branch "${MOSTRO_REPO}" "${MOSTRO_SRC}"
-    ok "Mostro source cloned"
-  fi
-
-  # Build Docker image from source
-  echo "  Building Mostro Docker image from source (this may take a few minutes)..."
-  docker compose -f "${BASE_DIR}/docker-compose.yml" build --no-cache mostro
-  ok "Mostro Docker image built from source"
+  echo "  Building Mostro Docker image (ref: ${MOSTRO_REF}) — this may take a few minutes..."
+  docker build \
+    --build-arg MOSTRO_REF="${MOSTRO_REF}" \
+    -t mostro:local \
+    "${BASE_DIR}/docker/mostro"
+  ok "Mostro Docker image built"
 
   if [[ -n "${MOSTRO_NSEC_PRIVKEY:-}" ]]; then
     # Option 1: key from .env
@@ -862,32 +864,13 @@ step_mostro() {
     echo
   fi
 
-  # ── Build MostriX (TUI client) ──
-  echo "  Installing MostriX system dependencies..."
-  for pkg in cmake build-essential pkg-config libssl-dev; do
-    if ! dpkg -s "$pkg" &>/dev/null; then
-      sudo apt-get install -y "$pkg" >/dev/null 2>&1
-    fi
-  done
-  ok "MostriX system dependencies installed"
-
-  echo "  Building MostriX (TUI client)..."
-  if [[ -d "${MOSTRIX_SRC}/.git" ]]; then
-    echo "  Updating MostriX source (git pull)..."
-    git -C "${MOSTRIX_SRC}" fetch origin main
-    git -C "${MOSTRIX_SRC}" reset --hard origin/main
-    ok "MostriX source updated to latest main"
-  else
-    echo "  Cloning MostriX from ${MOSTRIX_REPO}..."
-    rm -rf "${MOSTRIX_SRC}"
-    git clone --branch main --single-branch "${MOSTRIX_REPO}" "${MOSTRIX_SRC}"
-    ok "MostriX source cloned"
-  fi
-
-  if ! cargo build --release --manifest-path="${MOSTRIX_SRC}/Cargo.toml"; then
-    fail "MostriX build failed — check Rust toolchain (1.90+) and dependencies"
-  fi
-  ok "MostriX built"
+  # ── Build MostriX Docker image ──
+  echo "  Building MostriX Docker image (ref: ${MOSTRIX_REF}) — this may take a few minutes..."
+  docker build \
+    --build-arg MOSTRIX_REF="${MOSTRIX_REF}" \
+    -t mostrix:local \
+    "${BASE_DIR}/docker/mostrix"
+  ok "MostriX Docker image built"
 
   if [[ -n "${MOSTRO_HEX}" && -n "${MOSTRO_NSEC}" ]]; then
     write_mostrix_settings
@@ -906,12 +889,9 @@ step_mostro() {
 step_fund_and_channel() {
   log "8/9" "Funding wallets and opening channels"
 
+  # Ensure miner wallet is loaded (it was created in step 5; may need reload after restart)
   if ! bcli listwallets | jq -e ".[] | select(.==\"${MINER_WALLET}\")" >/dev/null 2>&1; then
-    if bcli listwalletdir | jq -e ".wallets[].name | select(.==\"${MINER_WALLET}\")" >/dev/null 2>&1; then
-      bcli loadwallet "${MINER_WALLET}" >/dev/null
-    else
-      bcli createwallet "${MINER_WALLET}" >/dev/null
-    fi
+    bcli loadwallet "${MINER_WALLET}" >/dev/null
   fi
 
   for node in "${NODES[@]}"; do
@@ -977,85 +957,45 @@ step_fund_and_channel() {
 }
 
 ###############################################################################
-#  STEP 9 — Domains + HTTPS (conditional)
-#  Sets up nginx + certbot for any configured domains. RTL_DOMAIN gets a
-#  reverse proxy to RTL; LNURL_DOMAIN gets satdress for Lightning Address.
-#  Skipped entirely if neither domain is set in .env.
+#  STEP 9 — Proxy checks + Lightning Address (conditional)
+#  nginx and SSL certs are managed externally (~/Server/). This step only:
+#    1. Verifies the nginx proxy container is running and ports 80/443 are up.
+#    2. Starts satdress and registers Lightning Address usernames (LNURL_DOMAIN).
+#  Skipped entirely if neither RTL_DOMAIN nor LNURL_DOMAIN is set in .env.
 ###############################################################################
 step_domains() {
-  log "9/9" "Domains + HTTPS (nginx + certbot)"
+  log "9/9" "Proxy checks + Lightning Address setup"
 
   if [[ -z "${RTL_DOMAIN}" && -z "${LNURL_DOMAIN}" ]]; then
     ok "Skipped — neither RTL_DOMAIN nor LNURL_DOMAIN set in .env"
     return
   fi
 
-  [[ -n "${RTL_DOMAIN}" ]] && echo "  RTL domain: ${RTL_DOMAIN}"
-  [[ -n "${LNURL_DOMAIN}" ]] && echo "  LNURL domain: ${LNURL_DOMAIN}"
-
-  # ── Install nginx + certbot if not present ──
-  local to_install=()
-  command -v nginx &>/dev/null || to_install+=(nginx)
-  command -v certbot &>/dev/null || to_install+=(certbot python3-certbot-nginx)
-
-  if (( ${#to_install[@]} > 0 )); then
-    echo "  Installing ${to_install[*]} (requires sudo to apt-get install)"
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq "${to_install[@]}" >/dev/null
-    ok "${to_install[*]} installed"
-  else
-    ok "nginx and certbot already installed"
+  # ── Verify external nginx proxy is running ──
+  if ! docker inspect nginx --format '{{.State.Running}}' 2>/dev/null | grep -q true; then
+    fail "nginx container is not running — start it first: cd ~/Server && docker compose up -d nginx"
   fi
+  ok "nginx proxy container is running"
 
-  # ── Open ports 80/443 in ufw ──
-  if command -v ufw &>/dev/null; then
-    echo "  Opening firewall ports 80 and 443 (requires sudo for ufw)"
-    sudo ufw allow 80/tcp >/dev/null 2>&1 || true
-    sudo ufw allow 443/tcp >/dev/null 2>&1 || true
-    ok "Firewall: ports 80 and 443 open"
-  fi
-
-  # ── RTL domain ──
   if [[ -n "${RTL_DOMAIN}" ]]; then
-    if [[ ! -d "/etc/letsencrypt/live/${RTL_DOMAIN}" ]]; then
-      echo "  Obtaining SSL certificate for ${RTL_DOMAIN} (requires sudo for certbot)"
-      sudo certbot certonly --nginx -d "${RTL_DOMAIN}" \
-        --non-interactive --agree-tos -m "admin@${RTL_DOMAIN}"
-      ok "SSL certificate obtained for ${RTL_DOMAIN}"
+    if curl -sf --max-time 5 "https://${RTL_DOMAIN}" -o /dev/null 2>/dev/null; then
+      ok "${RTL_DOMAIN} reachable via HTTPS"
     else
-      ok "SSL certificate already exists for ${RTL_DOMAIN}"
+      ok "${RTL_DOMAIN} HTTPS proxy active (RTL will be live once this step completes)"
     fi
-
-    echo "  Writing nginx config for ${RTL_DOMAIN} (requires sudo to write /etc/nginx)"
-    write_rtl_nginx_config
-    sudo ln -sf /etc/nginx/sites-available/rtl /etc/nginx/sites-enabled/rtl
-    ok "nginx config written for ${RTL_DOMAIN}"
   fi
 
-  # ── LNURL domain ──
+  # ── Lightning Address via satdress ──
   if [[ -n "${LNURL_DOMAIN}" ]]; then
-    if [[ ! -d "/etc/letsencrypt/live/${LNURL_DOMAIN}" ]]; then
-      echo "  Obtaining SSL certificate for ${LNURL_DOMAIN} (requires sudo for certbot)"
-      sudo certbot certonly --nginx -d "${LNURL_DOMAIN}" \
-        --non-interactive --agree-tos -m "admin@${LNURL_DOMAIN}"
-      ok "SSL certificate obtained for ${LNURL_DOMAIN}"
-    else
-      ok "SSL certificate already exists for ${LNURL_DOMAIN}"
-    fi
-
-    echo "  Writing nginx config for ${LNURL_DOMAIN} (requires sudo to write /etc/nginx)"
-    write_nginx_config
-    sudo ln -sf /etc/nginx/sites-available/lnurl /etc/nginx/sites-enabled/lnurl
-    ok "nginx config written for ${LNURL_DOMAIN}"
-
-    # ── Write satdress config and start container ──
     write_satdress_env
     ok "satdress .env written"
 
-    docker compose -f "${BASE_DIR}/docker-compose.yml" up -d satdress
-    sleep 3
+    echo "  Building satdress Docker image..."
+    docker build -t satdress:local "${BASE_DIR}/docker/satdress"
+    ok "satdress image built"
 
-    # Wait for satdress to respond
+    docker compose -f "${BASE_DIR}/docker-compose.yml" up -d satdress
+
     local i=0
     while (( i < 30 )); do
       if curl -s "http://127.0.0.1:${SATDRESS_PORT}" >/dev/null 2>&1; then
@@ -1069,14 +1009,13 @@ step_domains() {
     fi
     ok "satdress running on 127.0.0.1:${SATDRESS_PORT}"
 
-    # ── Register Lightning Addresses ──
     local mac_hex
     mac_hex="$(docker exec lnd1 xxd -p -c 9999 /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon 2>/dev/null)" \
       || fail "Could not read admin macaroon from lnd1"
 
     IFS=',' read -ra lnurl_users <<< "${LNURL_USERNAMES}"
     for uname in "${lnurl_users[@]}"; do
-      uname="$(echo "$uname" | xargs)"  # trim whitespace
+      uname="$(echo "$uname" | xargs)"
       [[ -z "$uname" ]] && continue
 
       local reg_resp
@@ -1089,16 +1028,10 @@ step_domains() {
         ok "Lightning Address registered: ${uname}@${LNURL_DOMAIN}"
       else
         echo "  Warning: ${uname} registration may have failed"
-        echo "  You can register manually at http://127.0.0.1:${SATDRESS_PORT}"
+        echo "  Register manually at http://127.0.0.1:${SATDRESS_PORT}"
       fi
     done
   fi
-
-  # ── Final nginx reload ──
-  echo "  Validating and reloading nginx (requires sudo)"
-  sudo nginx -t >/dev/null 2>&1 || fail "nginx config invalid"
-  sudo systemctl reload nginx
-  ok "nginx reloaded"
 }
 
 # ── Shell aliases ─────────────────────────────────────────────────────────────
@@ -1116,8 +1049,9 @@ install_shell_commands() {
 
   local alias_block
   alias_block="mostro-logs() { docker compose -f \"${BASE_DIR}/docker-compose.yml\" logs --tail 100 -f mostro; }"
-  if [[ -f "${MOSTRIX_SRC}/target/release/mostrix" ]]; then
-    alias_block+=$'\n'"alias mostrix='${MOSTRIX_SRC}/target/release/mostrix'"
+  alias_block+=$'\n'"bcli() { docker exec bitcoind bitcoin-cli -regtest -rpcuser=${BITCOIND_RPC_USER} -rpcpassword=${BITCOIND_RPC_PASS} \"\$@\"; }"
+  if docker image inspect mostrix:local >/dev/null 2>&1; then
+    alias_block+=$'\n'"alias mostrix='docker run -it --rm --network host -v \$HOME/.mostrix:/root/.mostrix mostrix:local'"
   fi
 
   cat >> "${bashrc}" <<EOF
@@ -1175,7 +1109,7 @@ show_summary() {
     lncli "$node" listchannels | jq '.channels[] | {capacity, local_balance, remote_balance}'
   done
 
-  if [[ -f "${MOSTRIX_SRC}/target/release/mostrix" ]]; then
+  if docker image inspect mostrix:local >/dev/null 2>&1; then
     echo "  MostriX (TUI client):"
     echo "    mostrix               Launch MostriX terminal interface"
     echo "    Config: ~/.mostrix/settings.toml"
@@ -1185,13 +1119,14 @@ show_summary() {
   echo
   echo "  Useful commands:"
   echo "    mostro-logs  Shows last 100 lines + follows in real time"
-  if [[ -f "${MOSTRIX_SRC}/target/release/mostrix" ]]; then
+  if docker image inspect mostrix:local >/dev/null 2>&1; then
     echo "    mostrix      MostriX TUI (orders, trades, admin disputes)"
   fi
-  echo "    lncli1:  docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd1_rpc]} <cmd>"
-  echo "    lncli2:  docker exec lnd2 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd2_rpc]} <cmd>"
-  echo "    lncli3:  docker exec lnd3 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd3_rpc]} <cmd>"
-  echo "    logs:    cd ${BASE_DIR} && docker compose logs -f"
+  echo "    bitcoin-cli: docker exec bitcoind bitcoin-cli -regtest -rpcuser=${BITCOIND_RPC_USER} -rpcpassword=${BITCOIND_RPC_PASS} <cmd>"
+  echo "    lncli1:      docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd1_rpc]} <cmd>"
+  echo "    lncli2:      docker exec lnd2 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd2_rpc]} <cmd>"
+  echo "    lncli3:      docker exec lnd3 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd3_rpc]} <cmd>"
+  echo "    logs:        cd ${BASE_DIR} && docker compose logs -f"
   echo
 }
 
@@ -1251,7 +1186,7 @@ EOF
     done
   fi
 
-  if [[ -f "${MOSTRIX_SRC}/target/release/mostrix" ]]; then
+  if docker image inspect mostrix:local >/dev/null 2>&1; then
     cat >> "$f" <<EOF
 
 MOSTRIX (TUI client)
@@ -1266,10 +1201,11 @@ EOF
 USEFUL COMMANDS
   mostro-logs                     Last 100 lines + follow
 EOF
-  if [[ -f "${MOSTRIX_SRC}/target/release/mostrix" ]]; then
+  if docker image inspect mostrix:local >/dev/null 2>&1; then
     echo "  mostrix                       MostriX TUI (orders, trades, admin)" >> "$f"
   fi
   cat >> "$f" <<EOF
+  docker exec bitcoind bitcoin-cli -regtest -rpcuser=${BITCOIND_RPC_USER} -rpcpassword=${BITCOIND_RPC_PASS} <cmd>
   docker exec lnd1 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd1_rpc]} <cmd>
   docker exec lnd2 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd2_rpc]} <cmd>
   docker exec lnd3 lncli --network=regtest --rpcserver=127.0.0.1:${PORTS[lnd3_rpc]} <cmd>

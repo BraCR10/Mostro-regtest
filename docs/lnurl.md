@@ -1,127 +1,67 @@
 # LNURL and Lightning Address
 
-## What is LNURL
-
-[LNURL](https://github.com/lnurl/luds) is a UX protocol on top of Lightning Network that replaces single-use invoices with reusable interactions: pay, receive, authenticate — all from a static QR code or a fixed URL.
-
-Main sub-protocols:
-
-| Protocol | What it does |
-|----------|-------------|
-| **lnurl-pay** (LUD-06) | Sender scans a QR/link and the server generates a BOLT11 invoice on the spot |
-| **lnurl-withdraw** | Receiver scans a QR and "withdraws" sats from a service |
-| **lnurl-auth** | Passwordless login — signs with the node key |
-| **lightning address** (LUD-16) | Human-readable address like `user@domain.com` that internally resolves to lnurl-pay |
-
 ## What is a Lightning Address
 
-A Lightning Address works like an email address but for receiving Bitcoin. Instead of sharing a 200-character invoice, you share something like:
+A Lightning Address looks like an email address (`bracr10@lndpanel.site`) but resolves to a BOLT11 invoice. When someone pays your Lightning Address:
 
-```
-satoshi@yourdomain.com
-```
-
-When someone pays that address, their wallet internally:
-
-1. Takes `satoshi@yourdomain.com` and makes a GET to `https://yourdomain.com/.well-known/lnurlp/satoshi`
-2. Your server responds with JSON (callback URL, min/max amounts, metadata)
-3. The wallet calls the callback with the chosen amount
-4. Your server generates a BOLT11 invoice from your LND node and returns it
+1. Their wallet fetches `https://lndpanel.site/.well-known/lnurlp/bracr10`
+2. satdress responds with LNURL-pay metadata
+3. The wallet requests an invoice for the chosen amount
+4. satdress asks lnd1 to generate a BOLT11 invoice and returns it
 5. The wallet pays the invoice
 
 ```
-Payer's wallet                        Your server + LND
-       |                                      |
-       |  GET /.well-known/lnurlp/satoshi      |
-       |  -----------------------------------> |
-       |                                      |
-       |  { callback, minSendable, ... }       |
-       |  <----------------------------------- |
-       |                                      |
-       |  GET callback?amount=50000            |
-       |  -----------------------------------> |
-       |                                      |
-       |  { pr: "lnbc500n1..." }               |
-       |  <----------------------------------- |
-       |                                      |
-       |  Pays the BOLT11 invoice              |
-       |  -----------------------------------> |
+Payer's wallet                         satdress + lnd1
+      │                                      │
+      │  GET /.well-known/lnurlp/bracr10     │
+      │ ────────────────────────────────────►│
+      │  { callback, minSendable, ... }      │
+      │ ◄────────────────────────────────────│
+      │  GET callback?amount=50000           │
+      │ ────────────────────────────────────►│
+      │  { pr: "lnbc500n1..." }              │
+      │ ◄────────────────────────────────────│
+      │  Pays invoice                        │
+      │ ────────────────────────────────────►│
 ```
 
-## What you need
+## Setup
 
-### 1. A domain
-
-You need to buy a domain (can be from [Namecheap](https://www.namecheap.com/), Porkbun, Cloudflare, etc.). The domain is what goes after the `@` in your Lightning Address.
-
-**All you do with the domain is point the DNS to your server** — no complex configuration, just an A record:
-
-```
-Type: A
-Host: @    (or the subdomain you want)
-Value: YOUR_VPS_IP
-TTL: Automatic
-```
-
-If you want to use a subdomain (e.g. `ln.yourdomain.com`):
-
-```
-Type: A
-Host: ln
-Value: YOUR_VPS_IP
-TTL: Automatic
-```
-
-### 2. HTTPS (SSL certificate)
-
-LNURL requires HTTPS. This setup uses **nginx + certbot** (Let's Encrypt) on the host. The script installs both automatically in step 9.
-
-### 3. An LNURL server (satdress)
-
-[satdress](https://github.com/nbd-wtf/satdress) is a lightweight Lightning Address server. It runs as a Docker container, receives HTTP requests at `/.well-known/lnurlp/<username>`, and generates invoices from your LND node.
-
-## How it's set up (step 9)
-
-Step 9 of `setup.sh` is **conditional** — it runs if `LNURL_DOMAIN` or `RTL_DOMAIN` is set in `.env`. The LNURL/satdress part only runs if `LNURL_DOMAIN` is set:
+Set in `.env`:
 
 ```bash
-# .env
-LNURL_DOMAIN=yourdomain.com
-LNURL_USERNAMES=admin         # optional, defaults to "admin"
+LNURL_DOMAIN=lndpanel.site
+LNURL_USERNAMES=bracr10        # comma-separated for multiple: bracr10,alice
 ```
 
-What step 9 does (shared for all domains):
+Step 9 of `setup.sh` handles the rest: starts satdress and registers the Lightning Address.
 
-1. Installs nginx + certbot (skips if already installed)
-2. Opens ports 80/443 in ufw
+The nginx proxy in `~/Server/` must be configured separately to forward `https://lndpanel.site` → `127.0.0.1:17422`. See [security.md](security.md).
 
-What step 9 does (when `LNURL_DOMAIN` is set):
+## satdress
 
-3. Obtains an SSL certificate via `certbot certonly --nginx`
-4. Writes an nginx reverse proxy config (HTTPS → satdress on `127.0.0.1:17422`)
-5. Writes satdress `.env` and starts the satdress Docker container
-6. Auto-registers `admin@yourdomain.com` via the satdress API, pointing to lnd1
+[satdress](https://github.com/nbd-wtf/satdress) is the Lightning Address server. It runs as a Docker container on `127.0.0.1:17422` and connects to lnd1 via its REST API and admin macaroon.
 
-If `RTL_DOMAIN` is also set, step 9 additionally obtains a cert and writes an nginx config for RTL (see [rtl.md](rtl.md)).
-
-## Architecture
+Config at `satdress/.env` (generated, chmod 600):
 
 ```
-Internet (payer's wallet)
-        |
-        v
-  nginx (ports 80/443, HTTPS)
-        |
-        v
-  satdress (127.0.0.1:17422)
-   /.well-known/lnurlp/*
-        |
-        v
-  lnd1 (127.0.0.1:8080 REST)
-   generates BOLT11 invoices
+PORT=17422
+DOMAIN=lndpanel.site
+HOST=127.0.0.1
+SECRET=<random hex>
 ```
 
-nginx runs on the host (not Docker) because it needs ports 80/443 and certbot integration. satdress runs in Docker with host networking, following the same pattern as lnd1/lnd2/lnd3.
+## Manual registration
+
+If auto-registration fails during setup, register manually:
+
+```bash
+MAC_HEX=$(docker exec lnd1 xxd -p -c 9999 /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon)
+
+curl -X POST http://127.0.0.1:17422/grab \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "name=bracr10&kind=lnd&host=https://127.0.0.1:8080&key=${MAC_HEX}"
+```
 
 ## Verification
 
@@ -129,23 +69,7 @@ nginx runs on the host (not Docker) because it needs ports 80/443 and certbot in
 # Check satdress is running
 docker ps | grep satdress
 
-# Check nginx config
-sudo nginx -t
-
-# Test the Lightning Address endpoint
-curl -s https://yourdomain.com/.well-known/lnurlp/admin
-
-# Expected response (LNURL-pay JSON):
-# {"callback":"...","maxSendable":...,"minSendable":...,"metadata":"...","tag":"payRequest"}
-```
-
-## Manual registration
-
-If auto-registration fails, you can register manually at `http://127.0.0.1:17422` in a browser (via SSH tunnel) or via the API:
-
-```bash
-MAC_HEX=$(docker exec lnd1 xxd -p -c 9999 /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon)
-curl -X POST http://127.0.0.1:17422/grab \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "name=admin&kind=lnd&host=https://127.0.0.1:8080&key=${MAC_HEX}"
+# Test the endpoint
+curl -s https://lndpanel.site/.well-known/lnurlp/bracr10
+# Expected: {"callback":"...","maxSendable":...,"tag":"payRequest"}
 ```
