@@ -9,3 +9,11 @@ docker-compose.yml
 satdress/
 summary.txt
 logs/
+
+# Allow docker build contexts (overrides patterns above)
+!docker/mostro/
+!docker/mostro/**
+!docker/bitcoind/
+!docker/bitcoind/**
+!docker/satdress/
+!docker/satdress/**
